@@ -63,16 +63,37 @@ exactly what's wired up versus still on the backlog.
     indicate a hidden process.
 - **Persistence** (`src/checks/persistence.rs`)
   - Non-empty `/etc/ld.so.preload` (global `LD_PRELOAD`, a common userland
-    rootkit technique).
-  - World-writable cron/systemd/ld.so.conf.d directories.
-  - Recently modified cron entries.
+    rootkit technique), plus its immutable (`chattr +i`) flag.
+  - World-writable cron/systemd/ld.so.conf.d directories; existence of an
+    executable `rc.local`.
+  - Recently-modified-entry sweep across cron, systemd units, SysV init
+    scripts, udev rules, kernel module autoload files, shell profile
+    scripts, and NetworkManager dispatcher hooks (see `AUTOSTART_TREES`).
   - World-writable or recently modified `~/.ssh/authorized_keys` for every
     account in `/etc/passwd`.
+  - Shell-history suppression (`HISTFILE=/dev/null`, etc.) in every
+    account's shell rc files.
+  - Recently modified XDG autostart entries, per-user and system-wide.
+- **Accounts** (`src/checks/accounts.rs`)
+  - UID 0 duplicates (a second root-equivalent account).
+  - Service accounts (uid < 1000) with an interactive shell or an `~/.ssh`
+    directory.
+  - Empty password hashes in `/etc/shadow`.
+  - Passwordless (`NOPASSWD:ALL`) entries in `/etc/sudoers` and
+    `/etc/sudoers.d/*`.
+  - Membership in root-equivalent groups (`root`/`wheel`/`sudo`/`docker`),
+    listed for manual review.
 
 Each finding carries a severity (`info` / `low` / `medium` / `high` /
 `critical`), a one-line summary, and a detail string explaining *why* it
 was flagged and how to look closer by hand — this tool is meant to point
 you at the right place, not to replace your judgment.
+
+Every scan also prints a **coverage** section: each check's status is
+`ok`, `partial` (ran, but some part couldn't be inspected — e.g.
+`/proc/<pid>/exe` denied for another user's process without root), or
+`failed`. A clean report is only meaningful next to a clean coverage
+section — see Philosophy above.
 
 ## Usage
 
@@ -106,14 +127,17 @@ Every check implements the `Check` trait (`src/checks/mod.rs`):
 ```rust
 pub trait Check: Send + Sync {
     fn name(&self) -> &'static str;
-    fn run(&self) -> Result<Vec<Finding>>;
+    fn run(&self) -> Result<CheckOutput>;
 }
 ```
 
-`checks::all_checks()` returns the active set; `main.rs` runs them either
-once (`scan`) or on a timer (`watch`) and renders the resulting
-`Finding`s. Adding a new detector means adding a new module and one line
-in `all_checks()` — no other wiring required.
+`CheckOutput` carries both `findings: Vec<Finding>` and `skipped:
+Vec<String>` — the latter is how a check admits it couldn't fully inspect
+something (coverage honesty, see Philosophy). `checks::all_checks()`
+returns the active set; `main.rs` runs them either once (`scan`) or on a
+timer (`watch`), turns each `skipped` list into a `Coverage` entry, and
+renders both. Adding a new detector means adding a new module and one
+line in `all_checks()` — no other wiring required.
 
 ## Documentation
 
@@ -137,13 +161,15 @@ in `all_checks()` — no other wiring required.
 
 ## Roadmap
 
-Phase 1 (triage sweep) continues with accounts, PAM/udev/BPF-program
-checks, and a JSON report with explicit per-check coverage (ran / skipped /
-failed — never silently "clean"). Full four-phase roadmap in
-`docs/SPEC.md` §7:
+Phase 1 (triage sweep) continues with PAM module hashing, deeper udev
+`RUN+=`/`PROGRAM=` attribution, BPF-program enumeration, and package-hash
+attribution for persistence/SUID entries (today's checks flag by
+heuristic — location, recency, permission bits — not "is this owned by a
+package"). Full four-phase roadmap in `docs/SPEC.md` §7:
 
 1. **Triage sweep** — persistence, accounts, process/socket cross-view,
-   `ld.so.preload`/PAM/udev/BPF checks, JSON report. *(in progress)*
+   `ld.so.preload`/PAM/udev/BPF checks, JSON report with coverage honesty.
+   *(in progress — see CLAUDE.md's "Current implementation status")*
 2. **Deep forensics** — raw-disk parsing, memory capture (AVML/LiME +
    Volatility 3), io_uring/mmap-tamper detection, timeline, dead-box mode.
 3. **Continuous** — eBPF/LSM + auditd sensor, baselining, collector,

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::Result;
 use tracing::debug;
 
 use super::Check;
-use crate::report::{Finding, Severity};
+use crate::report::{CheckOutput, Finding, Severity};
 
 const SUSPICIOUS_EXE_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/dev/.", "/run/shm"];
 
@@ -17,11 +18,12 @@ impl Check for ProcessCheck {
         "processes"
     }
 
-    fn run(&self) -> Result<Vec<Finding>> {
-        let mut findings = Vec::new();
+    fn run(&self) -> Result<CheckOutput> {
+        let mut out = CheckOutput::new();
 
         debug!("reading /proc to enumerate every pid directory");
         let mut inspected = 0usize;
+        let mut permission_denied = 0usize;
 
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
@@ -33,18 +35,29 @@ impl Check for ProcessCheck {
             let proc_dir = entry.path();
             let exe_link = proc_dir.join("exe");
 
-            // Kernel threads and processes that have already exited have no
-            // readable exe symlink; that's normal and not worth flagging.
-            let Ok(exe_target) = fs::read_link(&exe_link) else {
-                debug!(pid, "no readable /proc/{{pid}}/exe (kernel thread, exited, or no permission) — skipping");
-                continue;
+            let exe_target = match fs::read_link(&exe_link) {
+                Ok(target) => target,
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    // We can see the pid but not its exe target: a real coverage
+                    // gap, not a kernel thread. Count it rather than silently
+                    // treating it the same as "no such process".
+                    debug!(pid, "permission denied reading exe symlink — this pid's binary is NOT verified");
+                    permission_denied += 1;
+                    continue;
+                }
+                Err(_) => {
+                    // Kernel threads and processes that have already exited
+                    // have no exe symlink at all; that's normal.
+                    debug!(pid, "no exe symlink (kernel thread or already exited) — skipping");
+                    continue;
+                }
             };
             let exe_str = exe_target.to_string_lossy();
             inspected += 1;
             debug!(pid, exe = %exe_str, "resolved exe symlink");
 
             if exe_str.ends_with(" (deleted)") {
-                findings.push(Finding::new(
+                out.push(Finding::new(
                     self.name(),
                     Severity::High,
                     format!("pid {pid} is running from a binary deleted off disk"),
@@ -61,7 +74,7 @@ impl Check for ProcessCheck {
                 .iter()
                 .find(|d| Path::new(exe_str.as_ref()).starts_with(d))
             {
-                findings.push(Finding::new(
+                out.push(Finding::new(
                     self.name(),
                     Severity::Medium,
                     format!("pid {pid} is executing out of {dir}"),
@@ -76,7 +89,7 @@ impl Check for ProcessCheck {
             if let Ok(cmdline) = fs::read(&cmdline_path) {
                 debug!(pid, cmdline_bytes = cmdline.len(), "read cmdline");
                 if cmdline.is_empty() {
-                    findings.push(Finding::new(
+                    out.push(Finding::new(
                         self.name(),
                         Severity::Low,
                         format!("pid {pid} has an empty cmdline"),
@@ -90,7 +103,14 @@ impl Check for ProcessCheck {
             }
         }
 
-        debug!(inspected, "finished process check");
-        Ok(findings)
+        if permission_denied > 0 {
+            out.skip(format!(
+                "{permission_denied} process(es) had an unreadable /proc/<pid>/exe (permission denied) — \
+                 their binaries were not verified; run as root for full coverage"
+            ));
+        }
+
+        debug!(inspected, permission_denied, "finished process check");
+        Ok(out)
     }
 }

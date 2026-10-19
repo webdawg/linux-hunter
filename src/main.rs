@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use checks::all_checks;
-use report::{Finding, Severity};
+use report::{Coverage, CoverageStatus, Finding, Severity};
 
 #[derive(Parser)]
 #[command(name = "hunter", version, about = "Linux compromise detection platform: has this host been hacked, and how?")]
@@ -54,8 +55,8 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Watch { interval: 300 }) {
         Command::Scan { json } => {
-            let findings = run_all_checks();
-            print_report(&findings, json);
+            let report = run_all_checks();
+            print_report(&report, json);
         }
         Command::Watch { interval } => {
             run_watch_loop(interval).await?;
@@ -65,38 +66,71 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_all_checks() -> Vec<Finding> {
+#[derive(Serialize)]
+struct Report {
+    findings: Vec<Finding>,
+    coverage: Vec<Coverage>,
+}
+
+fn run_all_checks() -> Report {
     let mut findings = Vec::new();
+    let mut coverage = Vec::new();
+
     for check in all_checks() {
         debug!(check = check.name(), "starting check");
         match check.run() {
-            Ok(mut f) => {
-                debug!(check = check.name(), findings = f.len(), "check complete");
-                findings.append(&mut f);
+            Ok(mut output) => {
+                debug!(check = check.name(), findings = output.findings.len(), skipped = output.skipped.len(), "check complete");
+                let status = if output.skipped.is_empty() { CoverageStatus::Ran } else { CoverageStatus::Partial };
+                coverage.push(Coverage {
+                    check: check.name(),
+                    status,
+                    detail: output.skipped.join("; "),
+                });
+                findings.append(&mut output.findings);
             }
-            Err(err) => warn!(check = check.name(), error = %err, "check failed to run"),
+            Err(err) => {
+                warn!(check = check.name(), error = %err, "check failed to run");
+                coverage.push(Coverage {
+                    check: check.name(),
+                    status: CoverageStatus::Failed,
+                    detail: err.to_string(),
+                });
+            }
         }
     }
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity));
-    findings
+    findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
+    Report { findings, coverage }
 }
 
-fn print_report(findings: &[Finding], json: bool) {
+fn print_report(report: &Report, json: bool) {
     if json {
-        println!("{}", serde_json::to_string_pretty(findings).unwrap_or_default());
+        println!("{}", serde_json::to_string_pretty(report).unwrap_or_default());
         return;
     }
 
-    if findings.is_empty() {
+    if report.findings.is_empty() {
         println!("No findings.");
-        return;
+    } else {
+        for finding in &report.findings {
+            println!("[{}] ({}) {}", finding.severity, finding.check, finding.summary);
+            println!("    {}\n", finding.detail.replace('\n', "\n    "));
+        }
+        println!("{} finding(s).", report.findings.len());
     }
 
-    for finding in findings {
-        println!("[{}] ({}) {}", finding.severity, finding.check, finding.summary);
-        println!("    {}\n", finding.detail.replace('\n', "\n    "));
+    println!("\nCoverage:");
+    for entry in &report.coverage {
+        let marker = match entry.status {
+            CoverageStatus::Ran => "ok",
+            CoverageStatus::Partial => "PARTIAL",
+            CoverageStatus::Failed => "FAILED",
+        };
+        println!("  [{marker}] {}", entry.check);
+        if !entry.detail.is_empty() {
+            println!("      {}", entry.detail);
+        }
     }
-    println!("{} finding(s).", findings.len());
 }
 
 async fn run_watch_loop(interval_secs: u64) -> Result<()> {
@@ -106,8 +140,8 @@ async fn run_watch_loop(interval_secs: u64) -> Result<()> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let findings = run_all_checks();
-                for finding in &findings {
+                let report = run_all_checks();
+                for finding in &report.findings {
                     match finding.severity {
                         Severity::Critical | Severity::High => {
                             tracing::error!(check = finding.check, summary = %finding.summary, detail = %finding.detail, "finding");
@@ -120,7 +154,14 @@ async fn run_watch_loop(interval_secs: u64) -> Result<()> {
                         }
                     }
                 }
-                if findings.is_empty() {
+                for entry in &report.coverage {
+                    match entry.status {
+                        CoverageStatus::Ran => debug!(check = entry.check, "full coverage this pass"),
+                        CoverageStatus::Partial => warn!(check = entry.check, detail = %entry.detail, "partial coverage this pass"),
+                        CoverageStatus::Failed => tracing::error!(check = entry.check, detail = %entry.detail, "check failed this pass"),
+                    }
+                }
+                if report.findings.is_empty() {
                     info!("scan pass complete, no findings");
                 }
             }

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::Result;
 use tracing::debug;
 
 use super::Check;
-use crate::report::{Finding, Severity};
+use crate::report::{CheckOutput, Finding, Severity};
 
 const SUSPICIOUS_EXE_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm"];
 
@@ -24,8 +25,8 @@ impl Check for NetworkCheck {
         "network"
     }
 
-    fn run(&self) -> Result<Vec<Finding>> {
-        let mut findings = Vec::new();
+    fn run(&self) -> Result<CheckOutput> {
+        let mut out = CheckOutput::new();
         let running_as_root = unsafe { libc::geteuid() } == 0;
         debug!(running_as_root, "checked effective uid");
 
@@ -42,8 +43,15 @@ impl Check for NetworkCheck {
         }
 
         debug!("walking /proc/*/fd to build an inode -> pid map (view #2 of who owns each socket)");
-        let inode_to_pid = build_inode_to_pid_map();
+        let (inode_to_pid, permission_denied) = build_inode_to_pid_map();
         debug!(mapped_sockets = inode_to_pid.len(), "finished building inode -> pid map");
+
+        if !running_as_root && permission_denied > 0 {
+            out.skip(format!(
+                "{permission_denied} process(es)' fd tables were unreadable (permission denied) — \
+                 socket-to-process mapping is incomplete; run as root for full coverage"
+            ));
+        }
 
         for listener in &listeners {
             let owner = inode_to_pid.get(&listener.inode);
@@ -52,7 +60,7 @@ impl Check for NetworkCheck {
             match owner {
                 None => {
                     if running_as_root {
-                        findings.push(Finding::new(
+                        out.push(Finding::new(
                             self.name(),
                             Severity::Medium,
                             format!("listening socket {} has no identifiable owning process", listener.local_addr),
@@ -71,7 +79,7 @@ impl Check for NetworkCheck {
                     if let Ok(exe_target) = fs::read_link(&exe_link) {
                         let exe_str = exe_target.to_string_lossy();
                         if exe_str.ends_with(" (deleted)") {
-                            findings.push(Finding::new(
+                            out.push(Finding::new(
                                 self.name(),
                                 Severity::Critical,
                                 format!("listening socket {} is owned by pid {pid}, whose binary was deleted after exec", listener.local_addr),
@@ -81,7 +89,7 @@ impl Check for NetworkCheck {
                             .iter()
                             .find(|d| Path::new(exe_str.as_ref()).starts_with(d))
                         {
-                            findings.push(Finding::new(
+                            out.push(Finding::new(
                                 self.name(),
                                 Severity::High,
                                 format!("listening socket {} is owned by pid {pid}, executing out of {dir}", listener.local_addr),
@@ -93,7 +101,7 @@ impl Check for NetworkCheck {
             }
         }
 
-        Ok(findings)
+        Ok(out)
     }
 }
 
@@ -146,11 +154,15 @@ fn decode_hex_addr(hex_addr: &str) -> String {
     }
 }
 
-fn build_inode_to_pid_map() -> HashMap<u64, u32> {
+/// Returns the inode -> pid map plus a count of pids whose fd table we could
+/// not read because we lack permission (as opposed to the pid having simply
+/// exited, which `fs::read_dir` also reports as an error but isn't a gap).
+fn build_inode_to_pid_map() -> (HashMap<u64, u32>, usize) {
     let mut map = HashMap::new();
+    let mut permission_denied = 0usize;
 
     let Ok(proc_entries) = fs::read_dir("/proc") else {
-        return map;
+        return (map, permission_denied);
     };
 
     for entry in proc_entries.flatten() {
@@ -159,18 +171,24 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
         };
 
         let fd_dir = entry.path().join("fd");
-        let Ok(fds) = fs::read_dir(&fd_dir) else {
-            continue; // not our process and we lack permission; not evidence of anything
+        let fds = match fs::read_dir(&fd_dir) {
+            Ok(fds) => fds,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                debug!(pid, "permission denied reading fd table — this pid's sockets are NOT mapped");
+                permission_denied += 1;
+                continue;
+            }
+            Err(_) => continue, // pid exited between readdir and now; not a gap
         };
 
         let mut sockets_for_pid = 0usize;
         for fd in fds.flatten() {
-            if let Ok(target) = fs::read_link(fd.path()) {
-                if let Some(inode) = parse_socket_inode(&target.to_string_lossy()) {
-                    debug!(pid, inode, "fd points at a socket");
-                    map.insert(inode, pid);
-                    sockets_for_pid += 1;
-                }
+            if let Ok(target) = fs::read_link(fd.path())
+                && let Some(inode) = parse_socket_inode(&target.to_string_lossy())
+            {
+                debug!(pid, inode, "fd points at a socket");
+                map.insert(inode, pid);
+                sockets_for_pid += 1;
             }
         }
         if sockets_for_pid > 0 {
@@ -178,7 +196,7 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
         }
     }
 
-    map
+    (map, permission_denied)
 }
 
 fn parse_socket_inode(link_target: &str) -> Option<u64> {

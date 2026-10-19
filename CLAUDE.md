@@ -84,20 +84,35 @@ Language choice is settled: **Rust**. The "suggested repository layout" above is
 Go idioms (`cmd/`, `internal/`); this repo instead uses a flat Cargo binary crate:
 
 ```
-src/main.rs            CLI entrypoint (clap: scan, watch) — plays the role of cmd/hunter/
-src/report.rs          Finding/Severity types — plays the role of internal/report/
-src/checks/mod.rs       Check trait + registry — plays the role of internal/checks/
-src/checks/processes.rs   deleted-exe / temp-dir exec / empty-cmdline detection
+src/main.rs               CLI entrypoint (clap: scan, watch) — plays the role of cmd/hunter/
+src/report.rs             Finding/Severity/CheckOutput/Coverage types — internal/report/
+src/checks/mod.rs         Check trait + registry — plays the role of internal/checks/
+src/checks/processes.rs   deleted-exe / temp-dir exec / empty-cmdline / permission-gap tracking
 src/checks/network.rs     listening-socket cross-view (proc/net/tcp{,6} vs /proc/*/fd)
-src/checks/persistence.rs ld.so.preload, world-writable cron/systemd dirs, authorized_keys
+src/checks/persistence.rs ld.so.preload (+ immutable flag), world-writable dirs, rc.local,
+                           cron/systemd/init.d/udev/modules-load.d/profile.d/NM-dispatcher
+                           recency sweep, authorized_keys, shell history suppression, XDG
+                           autostart — see AUTOSTART_TREES for the exact location list
+src/checks/accounts.rs    uid-0 duplicates, service-account shell/.ssh posture, empty shadow
+                           hashes, sudoers NOPASSWD:ALL, root-equivalent group membership
 ```
 
 Not yet started: `internal/collect` (shared raw collectors), `internal/crossview` (a real
-diff engine — today's cross-view logic lives inline in `network.rs`), `internal/baseline`,
-YARA/Sigma `rules/`, and `testbench/`. Binary is still dynamically linked against glibc;
-switching the release build to the `x86_64-unknown-linux-musl` target (per rule #2 above) is
-outstanding.
+diff engine — today's cross-view logic lives inline in `network.rs`), `internal/baseline`
+(package-hash attribution — every persistence entry is currently flagged by recency/location
+heuristics only, not "is this owned by a package"), YARA/Sigma `rules/`, and `testbench/`.
+Binary is still dynamically linked against glibc; switching the release build to the
+`x86_64-unknown-linux-musl` target (per rule #2 above) is outstanding. PAM module hashing and
+BPF-program enumeration (§3.3/§3.6 in SPEC.md) have no check yet.
 
-Phase 1 progress against the build order: persistence enumeration and socket cross-view have
-a first pass; accounts, PAM/udev/BPF-program checks, and the JSON report's coverage-honesty
-field (rule #8) are not yet implemented.
+Coverage honesty (rule #9) is implemented: `Check::run()` returns a `CheckOutput` with both
+`findings` and `skipped` (concise reasons like "N pids: permission denied"); `main.rs` turns
+`skipped` into a `Coverage` entry per check (`ran`/`partial`/`failed`) printed in every scan
+report and JSON output — a clean non-root scan should show `network`/`processes`/`accounts` as
+`PARTIAL`, never silently clean.
+
+Phase 1 progress against the build order: persistence enumeration, socket cross-view, and
+accounts now have a first pass. Still open: PAM module hashing, udev `RUN+=`/`PROGRAM=`
+attribution beyond recency, BPF-program checks, and package-hash attribution for every
+persistence/SUID entry (today's checks flag by heuristic, not by "is this owned by a
+package").
