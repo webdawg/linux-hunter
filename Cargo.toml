@@ -1,0 +1,21 @@
+[package]
+name = "linux-defense"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Continuous compromise-detection daemon for Linux hosts"
+repository = "https://github.com/webdawg/linux-defense"
+
+[[bin]]
+name = "linux-defensed"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
