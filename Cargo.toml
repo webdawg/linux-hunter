@@ -1,13 +1,13 @@
 [package]
-name = "linux-defense"
+name = "linux-hunter"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
-description = "Continuous compromise-detection daemon for Linux hosts"
-repository = "https://github.com/webdawg/linux-defense"
+description = "Linux compromise detection platform: has this host been hacked, and how?"
+repository = "https://github.com/webdawg/linux-hunter"
 
 [[bin]]
-name = "linux-defensed"
+name = "hunter"
 path = "src/main.rs"
 
 [dependencies]

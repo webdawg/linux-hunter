@@ -12,7 +12,7 @@ use checks::all_checks;
 use report::{Finding, Severity};
 
 #[derive(Parser)]
-#[command(name = "linux-defensed", version, about = "Continuous compromise-detection daemon for Linux hosts")]
+#[command(name = "hunter", version, about = "Linux compromise detection platform: has this host been hacked, and how?")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -37,7 +37,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("linux_defensed=info".parse()?))
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("hunter=info".parse()?))
         .init();
 
     let cli = Cli::parse();

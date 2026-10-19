@@ -1,21 +1,27 @@
-# linux-defense
+# linux-hunter
 
-A continuous compromise-detection daemon for Linux hosts, written in Rust.
+A Linux compromise detection platform. It answers one question per host:
+*has this machine been compromised, and how?*
 
 Most "is this box hacked?" guides boil down to a list of manual commands
 (`ps aux`, `netstat`, `ls -la /etc/cron.d`, ...) that you run once, by hand,
-after you already suspect something is wrong. `linux-defense` turns that
-checklist into a long-running daemon that watches continuously and flags
-things worth a human look, so you find out *before* someone tells you.
+after you already suspect something is wrong — using tools a rootkit can
+trivially lie to. `linux-hunter` is built the opposite way: never trust the
+suspect host's own tools, collect every important fact at least two
+independent ways, and treat disagreement between views as the strongest
+signal there is. The full design is in [`docs/SPEC.md`](docs/SPEC.md); the
+engineering rules every check must follow are in [`CLAUDE.md`](CLAUDE.md).
 
-It ships as a single static-ish binary with no interpreter or package
+It ships as a single static-ish Rust binary with no interpreter or package
 manager dependency on the target host, which matters when you don't
 necessarily trust the target's userland.
 
 ## Status
 
-Early scaffold. The check framework is in place with a first batch of
-working checks; many more are planned (see Roadmap).
+Early Phase 1 (triage sweep, per the roadmap below). The check framework is
+in place with a first batch of working checks, built before the fuller spec
+in `docs/` existed — see `CLAUDE.md`'s "Current implementation status" for
+exactly what's wired up versus still on the backlog.
 
 ## What it checks today
 
@@ -53,13 +59,13 @@ you at the right place, not to replace your judgment.
 cargo build --release
 
 # One-shot scan, human-readable
-./target/release/linux-defensed scan
+./target/release/hunter scan
 
 # One-shot scan, JSON (for feeding into something else)
-./target/release/linux-defensed scan --json
+./target/release/hunter scan --json
 
 # Run continuously, scanning every 300s (the daemon's default mode)
-./target/release/linux-defensed watch --interval 300
+./target/release/hunter watch --interval 300
 ```
 
 Most checks need root to see every process's `/proc/<pid>/exe` and `fd`
@@ -81,18 +87,41 @@ once (`scan`) or on a timer (`watch`) and renders the resulting
 `Finding`s. Adding a new detector means adding a new module and one line
 in `all_checks()` — no other wiring required.
 
+## Documentation
+
+- [`docs/SPEC.md`](docs/SPEC.md) — full architecture, the 14 detection
+  modules, anti-evasion design (why every fact needs 2+ independent
+  views), scoring, and the four-phase roadmap.
+- [`docs/research/persistence-techniques.md`](docs/research/persistence-techniques.md) —
+  every known Linux autostart/persistence location; the detection backlog
+  for `src/checks/persistence.rs`.
+- [`docs/research/hiding-techniques.md`](docs/research/hiding-techniques.md) —
+  how attackers hide processes, files, network traffic, modules, and logs,
+  and the counter-view for each.
+- [`docs/research/malware-case-studies.md`](docs/research/malware-case-studies.md) —
+  real malware families (2014 → 2026) mapped to the techniques they used;
+  each becomes a test-bench scenario.
+- [`docs/research/sources.md`](docs/research/sources.md) — citations for
+  all of the above.
+- [`CLAUDE.md`](CLAUDE.md) — non-negotiable engineering rules (never shell
+  out to host tools, cross-view everything, read-only by default, ...) and
+  current implementation status.
+
 ## Roadmap
 
-- Filesystem integrity: hash key system binaries against a stored
-  baseline and flag drift.
-- Kernel: enumerate loaded modules and flag unsigned/unknown ones.
-- Auth logs: parse `journald`/`auth.log` for brute-force patterns, new
-  sudoers, unexpected root logins.
-- Baseline diffing: persist scan state so later runs report *changes*,
-  not just the current snapshot.
-- Alerting: webhook/syslog output for `high`/`critical` findings instead
-  of (or in addition to) log lines.
-- Config file for tuning watch paths, severities, and check selection.
+Phase 1 (triage sweep) continues with accounts, PAM/udev/BPF-program
+checks, and a JSON report with explicit per-check coverage (ran / skipped /
+failed — never silently "clean"). Full four-phase roadmap in
+`docs/SPEC.md` §7:
+
+1. **Triage sweep** — persistence, accounts, process/socket cross-view,
+   `ld.so.preload`/PAM/udev/BPF checks, JSON report. *(in progress)*
+2. **Deep forensics** — raw-disk parsing, memory capture (AVML/LiME +
+   Volatility 3), io_uring/mmap-tamper detection, timeline, dead-box mode.
+3. **Continuous** — eBPF/LSM + auditd sensor, baselining, collector,
+   correlation, scoring.
+4. **Root of trust** — firmware/boot verification, TPM attestation,
+   hypervisor introspection, fleet hunting.
 
 ## License
 
