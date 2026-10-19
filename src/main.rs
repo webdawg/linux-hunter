@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use checks::all_checks;
 use report::{Finding, Severity};
@@ -14,6 +14,13 @@ use report::{Finding, Severity};
 #[derive(Parser)]
 #[command(name = "hunter", version, about = "Linux compromise detection platform: has this host been hacked, and how?")]
 struct Cli {
+    /// Drop the running narration (every file read, every process inspected) and
+    /// show only warnings and findings. Maximum verbosity is the default: this
+    /// tool is built to be read, not trusted blindly, so showing its work is the
+    /// point. RUST_LOG still overrides both.
+    #[arg(long, short, global = true)]
+    quiet: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -36,11 +43,14 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env().add_directive("hunter=info".parse()?))
-        .init();
-
     let cli = Cli::parse();
+
+    let default_level = if cli.quiet { "warn" } else { "debug" };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(format!("hunter={default_level}").parse()?),
+        )
+        .init();
 
     match cli.command.unwrap_or(Command::Watch { interval: 300 }) {
         Command::Scan { json } => {
@@ -58,8 +68,12 @@ async fn main() -> Result<()> {
 fn run_all_checks() -> Vec<Finding> {
     let mut findings = Vec::new();
     for check in all_checks() {
+        debug!(check = check.name(), "starting check");
         match check.run() {
-            Ok(mut f) => findings.append(&mut f),
+            Ok(mut f) => {
+                debug!(check = check.name(), findings = f.len(), "check complete");
+                findings.append(&mut f);
+            }
             Err(err) => warn!(check = check.name(), error = %err, "check failed to run"),
         }
     }

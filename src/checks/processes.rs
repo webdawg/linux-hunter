@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use tracing::debug;
 
 use super::Check;
 use crate::report::{Finding, Severity};
@@ -19,6 +20,9 @@ impl Check for ProcessCheck {
     fn run(&self) -> Result<Vec<Finding>> {
         let mut findings = Vec::new();
 
+        debug!("reading /proc to enumerate every pid directory");
+        let mut inspected = 0usize;
+
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
             let file_name = entry.file_name();
@@ -32,9 +36,12 @@ impl Check for ProcessCheck {
             // Kernel threads and processes that have already exited have no
             // readable exe symlink; that's normal and not worth flagging.
             let Ok(exe_target) = fs::read_link(&exe_link) else {
+                debug!(pid, "no readable /proc/{{pid}}/exe (kernel thread, exited, or no permission) — skipping");
                 continue;
             };
             let exe_str = exe_target.to_string_lossy();
+            inspected += 1;
+            debug!(pid, exe = %exe_str, "resolved exe symlink");
 
             if exe_str.ends_with(" (deleted)") {
                 findings.push(Finding::new(
@@ -67,6 +74,7 @@ impl Check for ProcessCheck {
 
             let cmdline_path = proc_dir.join("cmdline");
             if let Ok(cmdline) = fs::read(&cmdline_path) {
+                debug!(pid, cmdline_bytes = cmdline.len(), "read cmdline");
                 if cmdline.is_empty() {
                     findings.push(Finding::new(
                         self.name(),
@@ -82,6 +90,7 @@ impl Check for ProcessCheck {
             }
         }
 
+        debug!(inspected, "finished process check");
         Ok(findings)
     }
 }

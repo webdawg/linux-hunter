@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use tracing::debug;
 
 use super::Check;
 use crate::report::{Finding, Severity};
@@ -45,7 +46,9 @@ impl Check for PersistenceCheck {
 
 fn check_ld_preload(findings: &mut Vec<Finding>) {
     let path = "/etc/ld.so.preload";
+    debug!(path, "checking global LD_PRELOAD file");
     if let Ok(contents) = fs::read_to_string(path) {
+        debug!(path, bytes = contents.len(), "file exists and was read");
         if !contents.trim().is_empty() {
             findings.push(Finding::new(
                 "persistence",
@@ -59,13 +62,20 @@ fn check_ld_preload(findings: &mut Vec<Finding>) {
                     contents.trim()
                 ),
             ));
+        } else {
+            debug!(path, "file exists but is empty — clean");
         }
+    } else {
+        debug!(path, "file does not exist — clean (this is the common case)");
     }
 }
 
 fn check_world_writable_dirs(findings: &mut Vec<Finding>) {
     for dir in WORLD_WRITABLE_WATCH {
+        debug!(dir, "checking directory permissions");
         if let Ok(meta) = fs::metadata(dir) {
+            let mode = meta.permissions().mode() & 0o7777;
+            debug!(dir, mode = format!("{mode:o}"), "read mode bits");
             if is_world_writable(meta.permissions().mode()) {
                 findings.push(Finding::new(
                     "persistence",
@@ -79,6 +89,8 @@ fn check_world_writable_dirs(findings: &mut Vec<Finding>) {
                     ),
                 ));
             }
+        } else {
+            debug!(dir, "does not exist on this system — clean");
         }
     }
 }
@@ -91,6 +103,7 @@ fn check_cron_recency(findings: &mut Vec<Finding>) {
         "/var/spool/cron",
     ];
 
+    debug!(?cron_paths, "walking cron locations for recently-modified entries");
     for base in cron_paths {
         walk_recent(Path::new(base), findings);
     }
@@ -98,10 +111,12 @@ fn check_cron_recency(findings: &mut Vec<Finding>) {
 
 fn walk_recent(path: &Path, findings: &mut Vec<Finding>) {
     let Ok(meta) = fs::metadata(path) else {
+        debug!(path = %path.display(), "path does not exist — skipping");
         return;
     };
 
     if meta.is_dir() {
+        debug!(path = %path.display(), "descending into directory");
         let Ok(entries) = fs::read_dir(path) else {
             return;
         };
@@ -113,6 +128,7 @@ fn walk_recent(path: &Path, findings: &mut Vec<Finding>) {
 
     if let Ok(modified) = meta.modified() {
         if let Ok(age) = SystemTime::now().duration_since(modified) {
+            debug!(path = %path.display(), age_secs = age.as_secs(), "read cron file mtime");
             if age.as_secs() < RECENT_WINDOW_SECS {
                 findings.push(Finding::new(
                     "persistence",
@@ -131,19 +147,23 @@ fn walk_recent(path: &Path, findings: &mut Vec<Finding>) {
 }
 
 fn check_authorized_keys(findings: &mut Vec<Finding>) {
+    debug!("reading /etc/passwd to enumerate every account's home directory");
     let Ok(passwd) = fs::read_to_string("/etc/passwd") else {
         return;
     };
 
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
+        let Some(user) = fields.first() else { continue };
         let Some(home) = fields.get(5) else { continue };
         if home.is_empty() {
             continue;
         }
 
         let auth_keys = Path::new(home).join(".ssh").join("authorized_keys");
+        debug!(user, path = %auth_keys.display(), "checking account's authorized_keys");
         let Ok(meta) = fs::metadata(&auth_keys) else {
+            debug!(user, "no authorized_keys file for this account — clean");
             continue;
         };
 

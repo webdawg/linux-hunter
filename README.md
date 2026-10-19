@@ -16,6 +16,27 @@ It ships as a single static-ish Rust binary with no interpreter or package
 manager dependency on the target host, which matters when you don't
 necessarily trust the target's userland.
 
+## Philosophy: radical transparency
+
+A security tool that tells you "trust me, it's clean" is asking for the
+same blind trust that let the compromise happen in the first place.
+`linux-hunter` is built to be read, not trusted blindly:
+
+- **Free and open, AGPL-3.0-or-later.** Anyone can read every check, run
+  it, fork it, and send a PR — including people checking whether *we'd*
+  ever ship a backdoor.
+- **Verbose by default, not opt-in.** Every file it opens, every `/proc`
+  entry it walks, every permission bit it reads, and the verdict it drew
+  from each one is narrated as it happens (`tracing` at `debug` level,
+  on unless you pass `--quiet`). A clean scan on a busy host is routinely
+  thousands of lines — that's the point. If you can't see what it looked
+  at, you can't tell what it might have missed.
+- **Coverage honesty.** A check that couldn't run (missing permission,
+  missing kernel feature, timeout) must say so explicitly — it is never
+  allowed to read as "clean" (CLAUDE.md rule #8).
+- **Explainable findings.** Every finding carries its raw evidence and a
+  plain-English reason, not just a severity label (CLAUDE.md rule #7).
+
 ## Status
 
 Early Phase 1 (triage sweep, per the roadmap below). The check framework is
@@ -58,8 +79,12 @@ you at the right place, not to replace your judgment.
 ```sh
 cargo build --release
 
-# One-shot scan, human-readable
+# One-shot scan. By default this also narrates everything it's inspecting
+# to stderr (see Philosophy above) — expect a lot of output.
 ./target/release/hunter scan
+
+# Same scan, findings only — no play-by-play narration
+./target/release/hunter --quiet scan
 
 # One-shot scan, JSON (for feeding into something else)
 ./target/release/hunter scan --json
@@ -67,6 +92,9 @@ cargo build --release
 # Run continuously, scanning every 300s (the daemon's default mode)
 ./target/release/hunter watch --interval 300
 ```
+
+`RUST_LOG` overrides the default narration level if you want something
+between "everything" and "--quiet", e.g. `RUST_LOG=hunter=info`.
 
 Most checks need root to see every process's `/proc/<pid>/exe` and `fd`
 entries; run unprivileged and you'll get a quieter, less complete picture.

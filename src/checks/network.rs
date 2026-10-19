@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use tracing::debug;
 
 use super::Check;
 use crate::report::{Finding, Severity};
@@ -26,18 +27,27 @@ impl Check for NetworkCheck {
     fn run(&self) -> Result<Vec<Finding>> {
         let mut findings = Vec::new();
         let running_as_root = unsafe { libc::geteuid() } == 0;
+        debug!(running_as_root, "checked effective uid");
 
         let mut listeners = Vec::new();
         for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+            debug!(path, "reading raw socket table");
             if let Ok(contents) = fs::read_to_string(path) {
-                listeners.extend(parse_listeners(&contents));
+                let found = parse_listeners(&contents);
+                debug!(path, listeners = found.len(), "parsed listening sockets from this table");
+                listeners.extend(found);
+            } else {
+                debug!(path, "table unreadable or absent (e.g. no IPv6 support) — skipping");
             }
         }
 
+        debug!("walking /proc/*/fd to build an inode -> pid map (view #2 of who owns each socket)");
         let inode_to_pid = build_inode_to_pid_map();
+        debug!(mapped_sockets = inode_to_pid.len(), "finished building inode -> pid map");
 
-        for listener in listeners {
+        for listener in &listeners {
             let owner = inode_to_pid.get(&listener.inode);
+            debug!(addr = %listener.local_addr, inode = listener.inode, owner = ?owner, "cross-referencing listener against fd map");
 
             match owner {
                 None => {
@@ -153,12 +163,18 @@ fn build_inode_to_pid_map() -> HashMap<u64, u32> {
             continue; // not our process and we lack permission; not evidence of anything
         };
 
+        let mut sockets_for_pid = 0usize;
         for fd in fds.flatten() {
             if let Ok(target) = fs::read_link(fd.path()) {
                 if let Some(inode) = parse_socket_inode(&target.to_string_lossy()) {
+                    debug!(pid, inode, "fd points at a socket");
                     map.insert(inode, pid);
+                    sockets_for_pid += 1;
                 }
             }
+        }
+        if sockets_for_pid > 0 {
+            debug!(pid, sockets = sockets_for_pid, "finished walking this pid's fd table");
         }
     }
 

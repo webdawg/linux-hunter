@@ -40,6 +40,11 @@ least one check in the codebase and one scenario in the test bench.
    evidence, and a plain-English "why this matters".
 8. **Coverage honesty.** If a check could not run (permissions, kernel feature missing,
    timeout), report it as *not checked* — never as clean.
+9. **Radical transparency.** This project is AGPL and built to be read, not trusted blindly.
+   Every check should narrate what it's doing at `debug` level as it runs — every file opened,
+   every entry enumerated, every verdict reached — not just emit findings at the end. Verbose
+   is the default; `--quiet` (or `RUST_LOG`) is how a user opts *out*, never the reverse. When
+   adding a check, add the narration in the same patch, not as a follow-up.
 
 ## Suggested repository layout
 
