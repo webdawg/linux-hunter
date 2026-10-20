@@ -153,6 +153,9 @@ line in `all_checks()` — no other wiring required.
 - [`docs/research/malware-case-studies.md`](docs/research/malware-case-studies.md) —
   real malware families (2014 → 2026) mapped to the techniques they used;
   each becomes a test-bench scenario.
+- [`third_party/README.md`](third_party/README.md) — vendored upstream tools
+  (currently: Lynis) kept for benchmarking only, each under its own
+  original license; explains why they're not part of `hunter`'s code path.
 - [`docs/research/sources.md`](docs/research/sources.md) — citations for
   all of the above.
 - [`CLAUDE.md`](CLAUDE.md) — non-negotiable engineering rules (never shell
