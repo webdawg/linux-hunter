@@ -127,7 +127,7 @@ service-internal stacks with no real auth by design) that would otherwise false-
 Don't re-raise severity or narrow the allowlist without testing against a real /etc/pam.d
 again, not just the file used to write the parser's unit tests.
 
-`testbench/` exists now (`./testbench/run.sh`): 7 scenarios, using unprivileged bubblewrap
+`testbench/` exists now (`./testbench/run.sh`): 9 scenarios, using unprivileged bubblewrap
 sandboxing rather than real VMs since this environment has no vagrant/libvirt (qemu +
 /dev/kvm are available if that changes). Covers userland/filesystem techniques only — see
 `testbench/README.md` for exactly why that's the current boundary and what it'll take to

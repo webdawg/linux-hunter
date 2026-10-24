@@ -24,7 +24,7 @@ set -uo pipefail
 HUNTER_BIN="${HUNTER_BIN:-$TESTBENCH_ROOT/../target/debug/hunter}"
 
 base_bwrap_args() {
-    local args=(--ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent --tmpfs /etc)
+    local args=(--ro-bind / / --dev /dev --proc /proc --unshare-all --die-with-parent --tmpfs /etc --tmpfs /tmp)
     local etc_file
     for etc_file in passwd group nsswitch.conf hostname resolv.conf ld.so.cache localtime; do
         args+=(--ro-bind-try "/etc/$etc_file" "/etc/$etc_file")
@@ -41,6 +41,39 @@ run_hunter_in_sandbox() {
     local base
     mapfile -t base < <(base_bwrap_args)
     bwrap "${base[@]}" "${extra[@]}" -- "$HUNTER_BIN" --quiet scan --json
+}
+
+# run_script_in_sandbox <script-file> <json-out-file> <extra bwrap arg>...
+# For scenarios that need to plant a live *process* (not just files)
+# before running hunter -- e.g. a backgrounded process with a deleted
+# exe, or one that's renamed itself via prctl(PR_SET_NAME) -- rather than
+# running hunter directly, this binds <script-file> into the sandbox and
+# executes it with bash. The script runs in the sandbox's own pid
+# namespace (clean and empty save for whatever it spawns itself, thanks
+# to --unshare-all in base_bwrap_args), so anything it backgrounds is
+# exactly what hunter will see when the script runs it. $HUNTER_BIN is
+# available to the script as an environment variable (via --setenv, so
+# it survives being embedded in a script written with a quoted heredoc --
+# see the process scenarios for why that matters). The sandbox's tmpfs
+# disappears when bwrap exits, so the script must write hunter's JSON
+# report to /tmp/output.json, which is bound through to <json-out-file>
+# on the real host so the caller can read it afterwards. (Bound under
+# /tmp specifically, not directly at /, because the real root is
+# read-only and /tmp is the one path base_bwrap_args already makes a
+# writable tmpfs -- binding a brand-new path directly under / fails the
+# same way planting a library directly under /usr/lib does; see
+# plant_fake_library_in_existing_dir's comment.)
+run_script_in_sandbox() {
+    local script_file="$1" json_out="$2"
+    shift 2
+    local extra=("$@")
+    local base
+    mapfile -t base < <(base_bwrap_args)
+    bwrap "${base[@]}" "${extra[@]}" \
+        --setenv HUNTER_BIN "$HUNTER_BIN" \
+        --bind "$script_file" /tmp/scenario-script.sh \
+        --bind "$json_out" /tmp/output.json \
+        -- bash /tmp/scenario-script.sh
 }
 
 # Library directories hunter's libraries.rs checks (kept in sync with

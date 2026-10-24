@@ -36,7 +36,8 @@ vagrant/libvirt aren't; that's the natural next step, not a from-scratch problem
 testbench/
   run.sh              Runs every scenario, prints a pass/fail summary
   lib/
-    sandbox.sh         Shared bwrap helpers: base sandbox args, library-dir overlay helper
+    sandbox.sh         Shared bwrap helpers: base sandbox args, library-dir overlay helper,
+                       run_script_in_sandbox for scenarios that plant a live process
     assert_finding.py  Checks hunter's JSON report for an expected finding
   scenarios/
     <name>/
@@ -59,8 +60,15 @@ hidden framework state.
 | `gtfobins-sudo-vim` | Sudo access scoped to a GTFOBins-listed binary | `gtfobins.rs::check_sudoers_commands` |
 | `uid-zero-duplicate` | Second root-equivalent (uid 0) account | `accounts.rs::check_uid_zero_duplicates` |
 | `pam-sufficient-permit` | `sufficient pam_permit.so` auth bypass pattern | `pam.rs::check_pam_config` |
+| `deleted-exe-process` | Process running from a binary deleted off disk | `processes.rs` (deleted-exe branch) |
+| `kernel-thread-masquerade` | Userspace process renamed via `prctl` to look like a kernel thread | `processes.rs` (`KERNEL_THREAD_NAME_PREFIXES`) |
 
 Each scenario's own `README.md` names the exact research-doc row it corresponds to.
+`deleted-exe-process` and `kernel-thread-masquerade` are the first two that plant a live
+*process* rather than just files — see `run_script_in_sandbox` in `testbench/lib/sandbox.sh`
+for how that works (a script runs inside the sandbox's own pid namespace, backgrounds
+whatever it needs to, then runs hunter against it; JSON output is bound back out to a real
+file on the host so it survives the sandbox tearing down).
 
 ## Known gaps
 
@@ -68,20 +76,18 @@ Each scenario's own `README.md` names the exact research-doc row it corresponds 
   finding appears; none assert it's *absent* from a clean run (though a clean baseline
   run was checked by hand while building this — see commit history). Worth adding if a
   check's false-positive rate ever becomes a question.
-- **No process/network scenarios yet** (kernel-thread masquerade, RWX anonymous
-  mapping, SCTP listener, deleted-exe process). These need a live planted *process*
-  inside the sandbox's pid namespace (spawn a background process, rename it via
-  `prctl`, etc.) rather than just planted files — mechanically straightforward given
-  `--unshare-pid` already gives each scenario a private, empty process table, just not
-  built yet.
+- **No network scenario yet** (an SCTP listener, or a listening socket with no
+  resolvable owner). `run_script_in_sandbox` already provides what this needs (plant a
+  process that opens the socket before hunter runs) — same pattern as the process
+  scenarios, just not built yet.
 - **No DT_NEEDED-injection scenario.** The technique `libraries.rs::check_trust_critical_binaries`
   is built for (`patchelf --add-needed` producing a duplicate dependency entry) needs a
   hand-crafted ELF with a duplicate `DT_NEEDED` tag; `patchelf` isn't installed in this
   environment and wasn't worth blocking the rest of the testbench on. Tracked, not
   forgotten — this is the check most directly inspired by the 2600 article.
-- **Coverage, not exhaustiveness.** Seven scenarios prove the harness works end-to-end
-  and cover five of the seven check modules (`persistence`, `libraries`, `gtfobins`,
-  `accounts`, `pam`); `processes` and `network` have zero scenarios yet (see above).
+- **Coverage, not exhaustiveness.** Nine scenarios prove the harness works end-to-end
+  and cover six of the seven check modules (`persistence`, `libraries`, `gtfobins`,
+  `accounts`, `pam`, `processes`); only `network` has zero scenarios now.
 
 ## Adding a scenario
 

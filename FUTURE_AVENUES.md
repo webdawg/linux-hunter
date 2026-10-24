@@ -105,10 +105,11 @@ point is "verbose and inspectable, not a black box":
 ## 6. Other avenues worth a line
 
 - **`testbench/` with real VM recipes — started, scoped down.** `testbench/run.sh` exists
-  with 6 scenarios, but using unprivileged bubblewrap sandboxing instead of real VMs (none
-  available in this environment). Covers userland/filesystem techniques only — see
-  `testbench/README.md`'s "Known gaps" for exactly what that excludes (process/network
-  scenarios, the DT_NEEDED-injection technique, anything kernel/eBPF-level) and what it'll
+  with 9 scenarios (including two that plant a live process, not just files — see
+  `run_script_in_sandbox`), using unprivileged bubblewrap sandboxing instead of real VMs
+  (none available in this environment). Covers userland/filesystem techniques only — see
+  `testbench/README.md`'s "Known gaps" for exactly what that excludes (a network scenario,
+  the DT_NEEDED-injection technique, anything kernel/eBPF-level) and what it'll
   take to extend past it. PANIX/Atomic Red Team integration and real VM recipes remain
   future work for whenever a kernel-level check needs them. `rules/` still doesn't exist.
 - **Package-hash baseline** (`internal/baseline` equivalent) — still the biggest structural gap
