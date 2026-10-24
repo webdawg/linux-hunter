@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod gtfobins;
 pub mod libraries;
 pub mod network;
+pub mod pam;
 pub mod persistence;
 pub mod processes;
 
@@ -25,5 +26,6 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(accounts::AccountsCheck),
         Box::new(libraries::LibraryCheck),
         Box::new(gtfobins::GtfobinsCheck),
+        Box::new(pam::PamCheck),
     ]
 }

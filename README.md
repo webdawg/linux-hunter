@@ -111,6 +111,18 @@ exactly what's wired up versus still on the backlog.
   they're SUID or sudo-permitted. Scoping `sudo` to "just one command" or
   setting a SUID bit for a narrow reason often hands out root without the
   admin realizing it's on this list.
+- **PAM** (`src/checks/pam.rs`)
+  - Installed PAM modules not on a curated common-modules allowlist —
+    Plague (2024-25) went undetected by every AV engine for a year as
+    exactly this: an unremarkable-looking `.so` in a PAM module
+    directory.
+  - `pam_exec.so` usage (runs an arbitrary command as part of the auth
+    flow — often legitimate, worth confirming).
+  - `sufficient` control-flag entries that can grant access on their own
+    without the rest of the stack running, for modules outside a
+    curated list of common legitimate uses (SSO fallthrough, su-style
+    "already proven" shortcuts) — the pattern malicious PAM modules use
+    for an authentication bypass.
 
 Each finding carries a severity (`info` / `low` / `medium` / `high` /
 `critical`), a one-line summary, and a detail string explaining *why* it

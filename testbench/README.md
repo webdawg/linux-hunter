@@ -58,6 +58,7 @@ hidden framework state.
 | `gtfobins-suid-find` | SUID binary with a documented GTFOBins technique | `gtfobins.rs::check_suid_binaries` |
 | `gtfobins-sudo-vim` | Sudo access scoped to a GTFOBins-listed binary | `gtfobins.rs::check_sudoers_commands` |
 | `uid-zero-duplicate` | Second root-equivalent (uid 0) account | `accounts.rs::check_uid_zero_duplicates` |
+| `pam-sufficient-permit` | `sufficient pam_permit.so` auth bypass pattern | `pam.rs::check_pam_config` |
 
 Each scenario's own `README.md` names the exact research-doc row it corresponds to.
 
@@ -78,9 +79,9 @@ Each scenario's own `README.md` names the exact research-doc row it corresponds 
   hand-crafted ELF with a duplicate `DT_NEEDED` tag; `patchelf` isn't installed in this
   environment and wasn't worth blocking the rest of the testbench on. Tracked, not
   forgotten — this is the check most directly inspired by the 2600 article.
-- **Coverage, not exhaustiveness.** Six scenarios prove the harness works end-to-end
-  and cover four of the six check modules (`persistence`, `libraries`, `gtfobins`,
-  `accounts`); `processes` and `network` have zero scenarios yet (see above).
+- **Coverage, not exhaustiveness.** Seven scenarios prove the harness works end-to-end
+  and cover five of the seven check modules (`persistence`, `libraries`, `gtfobins`,
+  `accounts`, `pam`); `processes` and `network` have zero scenarios yet (see above).
 
 ## Adding a scenario
 
