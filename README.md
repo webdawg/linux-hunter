@@ -104,6 +104,13 @@ exactly what's wired up versus still on the backlog.
     `chkrootkit`) — the signature `patchelf --add-needed` leaves behind
     when a binary is patched to silently load a malicious `.so` without
     touching `LD_PRELOAD` at all.
+- **GTFOBins** (`src/checks/gtfobins.rs`) — cross-references SUID/SGID
+  binaries and sudoers-permitted commands against name lists derived from
+  [GTFOBins](https://gtfobins.github.io/), the catalog of ordinary Unix
+  binaries (`vim`, `find`, `python`, ...) that double as a root shell once
+  they're SUID or sudo-permitted. Scoping `sudo` to "just one command" or
+  setting a SUID bit for a narrow reason often hands out root without the
+  admin realizing it's on this list.
 
 Each finding carries a severity (`info` / `low` / `medium` / `high` /
 `critical`), a one-line summary, and a detail string explaining *why* it

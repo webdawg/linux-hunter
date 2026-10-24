@@ -14,6 +14,15 @@ write-ups before turning them into rules.
   `docs/research/malware-case-studies.md` and implemented from scratch in
   `src/checks/libraries.rs` and `src/checks/processes.rs`.
 
+## Privilege-escalation technique catalogs
+- GTFOBins — https://gtfobins.github.io/ (data: https://github.com/GTFOBins/GTFOBins.github.io,
+  GPL-3.0). Catalog of ordinary Unix binaries exploitable for privilege escalation / file
+  read-write / shell spawning via a SUID bit or sudo access. `src/checks/gtfobins.rs` embeds two
+  name lists (`GTFOBINS_SUID`, `GTFOBINS_SUDO`) derived programmatically from this repo's
+  `_gtfobins/*` data files by checking which binaries have at least one function whose context
+  includes `suid`/`sudo`; GTFOBins' own write-ups are not reproduced. Snapshot taken
+  2026-10-24 — re-derive periodically, since GTFOBins adds entries over time.
+
 ## Overviews and detection engineering
 - Elastic Security Labs — Linux Detection Engineering: A primer on persistence mechanisms (introduces PANIX): https://www.elastic.co/security-labs/primer-on-persistence-mechanisms
 - Elastic Security Labs — A Continuation on Persistence Mechanisms: https://www.elastic.co/security-labs/continuation-on-persistence-mechanisms

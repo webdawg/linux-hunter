@@ -100,6 +100,9 @@ src/checks/accounts.rs    uid-0 duplicates, service-account shell/.ssh posture, 
 src/checks/libraries.rs   from-scratch ELF64-LE dynamic-section parser (no readelf/ldd);
                            duplicate-soname shadow libraries; duplicate DT_NEEDED / RPATH on
                            trust-critical binaries (ps/pgrep/pkill/killall/pidof/cron/rkhunter)
+src/checks/gtfobins.rs    SUID/SGID binaries and sudoers-permitted commands cross-referenced
+                           against embedded GTFOBins-derived name lists (308 SUID, 455 sudo
+                           entries; see docs/research/sources.md for provenance/re-derivation)
 ```
 
 Not yet started: `internal/collect` (shared raw collectors), `internal/crossview` (a real

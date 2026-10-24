@@ -46,20 +46,15 @@ phoning home — this is a tool people run on boxes they don't fully trust yet):
 | CISA KEV + OSV.dev | Known-exploited and open-source vuln feeds | Feeds the not-yet-built supply-chain/vuln module (SPEC §3.8) |
 | Distro advisories (Debian DSA, RHEL errata, Arch security tracker) | Per-package vulnerability status | Same module |
 
-## 3. GTFOBins-aware SUID/sudo check
+## 3. GTFOBins-aware SUID/sudo check — done
 
-A genuine miss, surfaced by thinking about what else the 2600 article's style of research
-implies: `docs/research/` has no equivalent of
-[GTFOBins](https://gtfobins.github.io/) — the catalog of ordinary Unix binaries
-(`find`, `vim`, `python`, `tar`, `less`, ...) that can be abused for privilege escalation,
-file read/write, or shell spawning when an attacker already has *some* foothold (a SUID bit, a
-sudo rule, a capability). SPEC.md §3.6 mentions "SUID/SGID inventory vs baseline" but nothing
-about cross-referencing that inventory against known-abusable binaries specifically.
-
-Concretely: enumerate SUID/SGID binaries and sudoers-permitted commands (we already read
-`/etc/sudoers` in `accounts.rs`), cross-reference the binary name against a vendored GTFOBins
-technique list, and flag matches. This is cheap relative to its value — low implementation
-cost, directly actionable, and it's the kind of thing a pentester checks first.
+Built: `src/checks/gtfobins.rs`. Enumerates SUID/SGID binaries in the standard bin/sbin
+directories and sudoers-permitted commands (`/etc/sudoers` + `/etc/sudoers.d/*`), cross-
+referenced against two name lists derived programmatically from GTFOBins' own data (308 SUID,
+455 sudo entries — see `docs/research/sources.md` for provenance and how to re-derive them as
+GTFOBins adds entries). Still open: SPEC.md §3.6's "SUID/SGID inventory vs baseline" more
+generally — this check flags only binaries with a *documented* GTFOBins technique, not drift
+from an expected SUID set, since there's no package-hash baseline yet (see §6 below).
 
 ## 4. The "ultimate network analysis tool"
 
