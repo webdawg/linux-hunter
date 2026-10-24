@@ -162,6 +162,10 @@ line in `all_checks()` — no other wiring required.
 
 ## Documentation
 
+- [`FUTURE_AVENUES.md`](FUTURE_AVENUES.md) — bigger/speculative directions
+  (research-ingestion pipeline, GTFOBins-aware checks, a real network
+  analysis tool, threat-intel integrations, optional Claude API use)
+  that aren't yet scoped into `docs/SPEC.md`'s committed roadmap.
 - [`docs/SPEC.md`](docs/SPEC.md) — full architecture, the 14 detection
   modules, anti-evasion design (why every fact needs 2+ independent
   views), scoring, and the four-phase roadmap.
