@@ -87,14 +87,19 @@ Go idioms (`cmd/`, `internal/`); this repo instead uses a flat Cargo binary crat
 src/main.rs               CLI entrypoint (clap: scan, watch) — plays the role of cmd/hunter/
 src/report.rs             Finding/Severity/CheckOutput/Coverage types — internal/report/
 src/checks/mod.rs         Check trait + registry — plays the role of internal/checks/
-src/checks/processes.rs   deleted-exe / temp-dir exec / empty-cmdline / permission-gap tracking
-src/checks/network.rs     listening-socket cross-view (proc/net/tcp{,6} vs /proc/*/fd)
+src/checks/processes.rs   deleted-exe / temp-dir exec / permission-gap tracking / kernel-thread
+                           name masquerade / all-null-byte argv wipe / anonymous RWX mappings
+src/checks/network.rs     listening-socket cross-view (proc/net/tcp{,6} + proc/net/sctp/eps vs
+                           /proc/*/fd), unit-tested against the real kernel field layouts
 src/checks/persistence.rs ld.so.preload (+ immutable flag), world-writable dirs, rc.local,
                            cron/systemd/init.d/udev/modules-load.d/profile.d/NM-dispatcher
                            recency sweep, authorized_keys, shell history suppression, XDG
                            autostart — see AUTOSTART_TREES for the exact location list
 src/checks/accounts.rs    uid-0 duplicates, service-account shell/.ssh posture, empty shadow
                            hashes, sudoers NOPASSWD:ALL, root-equivalent group membership
+src/checks/libraries.rs   from-scratch ELF64-LE dynamic-section parser (no readelf/ldd);
+                           duplicate-soname shadow libraries; duplicate DT_NEEDED / RPATH on
+                           trust-critical binaries (ps/pgrep/pkill/killall/pidof/cron/rkhunter)
 ```
 
 Not yet started: `internal/collect` (shared raw collectors), `internal/crossview` (a real
@@ -103,7 +108,14 @@ diff engine — today's cross-view logic lives inline in `network.rs`), `interna
 heuristics only, not "is this owned by a package"), YARA/Sigma `rules/`, and `testbench/`.
 Binary is still dynamically linked against glibc; switching the release build to the
 `x86_64-unknown-linux-musl` target (per rule #2 above) is outstanding. PAM module hashing and
-BPF-program enumeration (§3.3/§3.6 in SPEC.md) have no check yet.
+BPF-program enumeration (§3.3/§3.6 in SPEC.md) have no check yet. ELF parsing in
+`libraries.rs` only handles ELF64 little-endian (x86_64/arm64, per SPEC.md §1 scope) — 32-bit
+and big-endian binaries are skipped, not flagged as a gap, since they're out of scope.
+
+The anonymous-RWX-mapping check (`processes.rs`) is deliberately Medium, not Critical: it's the
+same shape as libffi closure trampolines (ubiquitous in GTK/GObject-Introspection/Python ctypes
+apps — small, zero-RSS-until-used) as well as a reflective shellcode loader. Verified by running
+it on a live desktop before landing it; don't re-raise the severity without re-checking that.
 
 Coverage honesty (rule #9) is implemented: `Check::run()` returns a `CheckOutput` with both
 `findings` and `skipped` (concise reasons like "N pids: permission denied"); `main.rs` turns

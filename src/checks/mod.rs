@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pub mod accounts;
+pub mod libraries;
 pub mod network;
 pub mod persistence;
 pub mod processes;
@@ -21,5 +22,6 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(network::NetworkCheck),
         Box::new(persistence::PersistenceCheck),
         Box::new(accounts::AccountsCheck),
+        Box::new(libraries::LibraryCheck),
     ]
 }

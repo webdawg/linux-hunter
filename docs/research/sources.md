@@ -4,6 +4,16 @@ Research compiled 2026-10-18. Entries for Ebury, xz-utils, Drovorub, XorDDoS his
 classic LKM rootkits draw also on well-established public reporting; verify against vendor
 write-ups before turning them into rules.
 
+## Educational / PoC rootkits (not in-the-wild malware, but direct detection targets)
+- Mephistolist, "Anti-Revisionist Malware," 2600 Magazine, Spring 2026, pp. 8–10 — published
+  walkthrough of a userland rootkit (DT_NEEDED injection via patchelf against trust-critical
+  binaries including rkhunter, shadow/fake-versioned libc, an SCTP reflective-shell backdoor,
+  reflective shellcode loading via anonymous mmap, kernel-thread-name + argv-wipe masquerading,
+  port-knock auth, self-mutating anti-debug code). Source code is not reproduced here or in our
+  codebase (copyright); techniques are described in our own words in
+  `docs/research/malware-case-studies.md` and implemented from scratch in
+  `src/checks/libraries.rs` and `src/checks/processes.rs`.
+
 ## Overviews and detection engineering
 - Elastic Security Labs — Linux Detection Engineering: A primer on persistence mechanisms (introduces PANIX): https://www.elastic.co/security-labs/primer-on-persistence-mechanisms
 - Elastic Security Labs — A Continuation on Persistence Mechanisms: https://www.elastic.co/security-labs/continuation-on-persistence-mechanisms

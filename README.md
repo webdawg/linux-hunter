@@ -52,11 +52,21 @@ exactly what's wired up versus still on the backlog.
     dropped payload hiding from on-disk scanners.
   - Processes executing out of world-writable scratch space (`/tmp`,
     `/dev/shm`, `/var/tmp`, ...).
-  - Processes with an empty `cmdline`, which is unusual outside of kernel
-    threads.
+  - A process named like a kernel thread (`kworker/`, `ksoftirqd/`, ...)
+    that nonetheless has a real `/proc/<pid>/exe` — genuine kernel threads
+    never do; this is a one-line `prctl(PR_SET_NAME)` masquerade.
+  - A `cmdline` that's empty, or — a stronger signal — non-empty but every
+    byte is `\0` (argv recorded at exec time, then wiped in place).
+  - Anonymous (no backing file, no `[heap]`/`[stack]`-style label) memory
+    mapped both writable and executable at once: the shape a reflective
+    shellcode loader leaves behind, flagged at medium confidence since
+    libffi closures and some JITs produce the same shape legitimately.
 - **Network** (`src/checks/network.rs`)
-  - Listening TCP sockets (from `/proc/net/tcp{,6}`) cross-referenced
-    against the process table via `/proc/*/fd`.
+  - Listening TCP sockets (from `/proc/net/tcp{,6}`) *and* SCTP endpoints
+    (from `/proc/net/sctp/eps`) cross-referenced against the process table
+    via `/proc/*/fd`. SCTP specifically: it's invisible to `netstat`
+    (deprecated since 2016) but not to `ss` or a raw `/proc` read, which
+    makes it an appealing channel for a backdoor banking on old habits.
   - Listeners owned by a deleted or temp-dir binary.
   - Listening sockets with no resolvable owning process, which — when
     running as root and therefore able to enumerate everything — can
@@ -83,6 +93,17 @@ exactly what's wired up versus still on the backlog.
     `/etc/sudoers.d/*`.
   - Membership in root-equivalent groups (`root`/`wheel`/`sudo`/`docker`),
     listed for manual review.
+- **Libraries** (`src/checks/libraries.rs`) — parses ELF64-LE directly, no
+  `readelf`/`ldd`:
+  - "Shadow" libraries: a second, differently-versioned soname for a core
+    library (e.g. a fake `libc.so.5` next to the real `libc.so.6`) sitting
+    in the same system library directory.
+  - Duplicate `DT_NEEDED` entries and the presence of `DT_RPATH`/
+    `DT_RUNPATH` on trust-critical binaries (`ps`, `pgrep`, `pkill`,
+    `killall`, `pidof`, `cron`/`crontab`, `top`, `lsof`, `rkhunter`,
+    `chkrootkit`) — the signature `patchelf --add-needed` leaves behind
+    when a binary is patched to silently load a malicious `.so` without
+    touching `LD_PRELOAD` at all.
 
 Each finding carries a severity (`info` / `low` / `medium` / `high` /
 `critical`), a one-line summary, and a detail string explaining *why* it

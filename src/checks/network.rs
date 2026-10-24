@@ -12,8 +12,10 @@ use crate::report::{CheckOutput, Finding, Severity};
 
 const SUSPICIOUS_EXE_DIRS: &[&str] = &["/tmp", "/dev/shm", "/var/tmp", "/run/shm"];
 
-/// A socket in LISTEN state, as read from /proc/net/tcp{,6}.
+/// A socket in LISTEN state, as read from /proc/net/tcp{,6} or
+/// /proc/net/sctp/eps.
 struct Listener {
+    proto: &'static str,
     local_addr: String,
     inode: u64,
 }
@@ -34,12 +36,28 @@ impl Check for NetworkCheck {
         for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
             debug!(path, "reading raw socket table");
             if let Ok(contents) = fs::read_to_string(path) {
-                let found = parse_listeners(&contents);
+                let found = parse_tcp_listeners(&contents);
                 debug!(path, listeners = found.len(), "parsed listening sockets from this table");
                 listeners.extend(found);
             } else {
                 debug!(path, "table unreadable or absent (e.g. no IPv6 support) — skipping");
             }
+        }
+
+        // SCTP: specifically worth checking in its own right, not just for
+        // completeness. It's a real, if obscure, transport -- and `netstat`
+        // (deprecated since 2016, still common on older admin habits) never
+        // learned to show it, which makes it an attractive channel for a
+        // backdoor that wants to be invisible to a quick `netstat -tlpn`
+        // glance while `ss` or a raw /proc/net/sctp read still sees it fine.
+        let sctp_path = "/proc/net/sctp/eps";
+        debug!(path = sctp_path, "reading raw SCTP endpoint table");
+        if let Ok(contents) = fs::read_to_string(sctp_path) {
+            let found = parse_sctp_listeners(&contents);
+            debug!(path = sctp_path, listeners = found.len(), "parsed listening SCTP endpoints");
+            listeners.extend(found);
+        } else {
+            debug!(path = sctp_path, "table unreadable or absent (sctp kernel module not loaded) — skipping");
         }
 
         debug!("walking /proc/*/fd to build an inode -> pid map (view #2 of who owns each socket)");
@@ -55,7 +73,7 @@ impl Check for NetworkCheck {
 
         for listener in &listeners {
             let owner = inode_to_pid.get(&listener.inode);
-            debug!(addr = %listener.local_addr, inode = listener.inode, owner = ?owner, "cross-referencing listener against fd map");
+            debug!(proto = listener.proto, addr = %listener.local_addr, inode = listener.inode, owner = ?owner, "cross-referencing listener against fd map");
 
             match owner {
                 None => {
@@ -63,7 +81,7 @@ impl Check for NetworkCheck {
                         out.push(Finding::new(
                             self.name(),
                             Severity::Medium,
-                            format!("listening socket {} has no identifiable owning process", listener.local_addr),
+                            format!("listening {} socket {} has no identifiable owning process", listener.proto, listener.local_addr),
                             format!(
                                 "inode {} appears in the listen table but no /proc/*/fd entry \
                                  maps to it. On a fully-enumerable system (we're running as \
@@ -82,7 +100,7 @@ impl Check for NetworkCheck {
                             out.push(Finding::new(
                                 self.name(),
                                 Severity::Critical,
-                                format!("listening socket {} is owned by pid {pid}, whose binary was deleted after exec", listener.local_addr),
+                                format!("listening {} socket {} is owned by pid {pid}, whose binary was deleted after exec", listener.proto, listener.local_addr),
                                 format!("exe: {exe_str}"),
                             ));
                         } else if let Some(dir) = SUSPICIOUS_EXE_DIRS
@@ -92,8 +110,23 @@ impl Check for NetworkCheck {
                             out.push(Finding::new(
                                 self.name(),
                                 Severity::High,
-                                format!("listening socket {} is owned by pid {pid}, executing out of {dir}", listener.local_addr),
+                                format!("listening {} socket {} is owned by pid {pid}, executing out of {dir}", listener.proto, listener.local_addr),
                                 format!("exe: {exe_str}"),
+                            ));
+                        } else if listener.proto == "sctp" {
+                            out.push(Finding::new(
+                                self.name(),
+                                Severity::Low,
+                                format!("listening sctp socket {} is owned by pid {pid}", listener.local_addr),
+                                format!(
+                                    "exe: {exe_str}. SCTP is rarely used legitimately outside \
+                                     telecom/signaling workloads and multipath setups, and \
+                                     classic `netstat` doesn't show SCTP sockets at all -- \
+                                     making it an attractive channel for a backdoor shell \
+                                     counting on an admin's `netstat -tlpn` habit. Flagged at \
+                                     low severity purely for visibility; confirm this process \
+                                     has a legitimate reason to speak SCTP."
+                                ),
                             ));
                         }
                     }
@@ -105,7 +138,7 @@ impl Check for NetworkCheck {
     }
 }
 
-fn parse_listeners(contents: &str) -> Vec<Listener> {
+fn parse_tcp_listeners(contents: &str) -> Vec<Listener> {
     const TCP_LISTEN: &str = "0A";
 
     contents
@@ -123,7 +156,43 @@ fn parse_listeners(contents: &str) -> Vec<Listener> {
 
             let inode = inode_field.parse::<u64>().ok()?;
             Some(Listener {
+                proto: "tcp",
                 local_addr: decode_hex_addr(local_addr),
+                inode,
+            })
+        })
+        .collect()
+}
+
+/// Parses /proc/net/sctp/eps. Columns (kernel net/sctp/proc.c):
+/// `ENDPT SOCK STY SST HBKT LPORT UID INODE LADDRS`. Unlike /proc/net/tcp,
+/// SST is decimal, not hex, but reuses the same generic inet socket-state
+/// numbering -- 10 is LISTEN either way. LADDRS is one or more local
+/// addresses (SCTP multi-homes); we join them for display since any of
+/// them is a valid way in.
+fn parse_sctp_listeners(contents: &str) -> Vec<Listener> {
+    const SCTP_LISTEN: &str = "10";
+
+    contents
+        .lines()
+        .skip(1) // header
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let state = fields.get(3)?;
+            let lport = fields.get(5)?;
+            let inode_field = fields.get(7)?;
+
+            if *state != SCTP_LISTEN {
+                return None;
+            }
+
+            let addrs: Vec<&str> = fields.get(8..).map(|rest| rest.to_vec()).unwrap_or_default();
+            let addr_display = if addrs.is_empty() { "*".to_string() } else { addrs.join(",") };
+
+            let inode = inode_field.parse::<u64>().ok()?;
+            Some(Listener {
+                proto: "sctp",
+                local_addr: format!("{addr_display}:{lport}"),
                 inode,
             })
         })
@@ -202,4 +271,48 @@ fn build_inode_to_pid_map() -> (HashMap<u64, u32>, usize) {
 fn parse_socket_inode(link_target: &str) -> Option<u64> {
     let inner = link_target.strip_prefix("socket:[")?.strip_suffix(']')?;
     inner.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tcp_listener_and_skips_established() {
+        let fixture = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+             0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 123456 1 0000000000000000 100 0 0 10 0\n\
+             1: 0101007F:0050 0202007F:C350 01 00000000:00000000 00:00000000 00000000     0        0 999999 1 0000000000000000 100 0 0 10 0\n";
+        let listeners = parse_tcp_listeners(fixture);
+        assert_eq!(listeners.len(), 1, "only the 0A (LISTEN) row should be kept, not the 01 (ESTABLISHED) row");
+        assert_eq!(listeners[0].proto, "tcp");
+        assert_eq!(listeners[0].local_addr, "127.0.0.1:8080");
+        assert_eq!(listeners[0].inode, 123456);
+    }
+
+    #[test]
+    fn parses_sctp_listener_per_kernel_field_layout() {
+        // Field layout per net/sctp/proc.c sctp_eps_seq_show:
+        // ENDPT SOCK STY SST HBKT LPORT UID INODE LADDRS...
+        let fixture = "ENDPT     SOCK      STY SST HBKT LPORT   UID INODE LADDRS\n\
+             ffff888012345678 ffff888087654321   2  10   45 12345     0 654321 127.0.0.1 10.0.0.5\n";
+        let listeners = parse_sctp_listeners(fixture);
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0].proto, "sctp");
+        assert_eq!(listeners[0].local_addr, "127.0.0.1,10.0.0.5:12345");
+        assert_eq!(listeners[0].inode, 654321);
+    }
+
+    #[test]
+    fn sctp_non_listen_state_is_skipped() {
+        // SST=1 is ESTABLISHED, not LISTEN (10) -- must not be reported as a listener.
+        let fixture = "ENDPT SOCK STY SST HBKT LPORT UID INODE LADDRS\n\
+             ffff8880 ffff8881 2 1 1 12345 0 111 127.0.0.1\n";
+        assert!(parse_sctp_listeners(fixture).is_empty());
+    }
+
+    #[test]
+    fn decodes_hex_addr_little_endian() {
+        // 0100007F little-endian = 127.0.0.1; 1F90 hex = port 8080.
+        assert_eq!(decode_hex_addr("0100007F:1F90"), "127.0.0.1:8080");
+    }
 }
