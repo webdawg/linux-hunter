@@ -104,10 +104,13 @@ point is "verbose and inspectable, not a black box":
 
 ## 6. Other avenues worth a line
 
-- **`testbench/` with real VM recipes** — SPEC Phase 1/validation already calls for this
-  (PANIX + Atomic Red Team planting techniques on disposable VMs), and it's arguably the
-  highest-leverage next investment: every check added without a regression test is a check that
-  can silently rot. Nothing in `third_party/` or `rules/` exists yet either.
+- **`testbench/` with real VM recipes — started, scoped down.** `testbench/run.sh` exists
+  with 6 scenarios, but using unprivileged bubblewrap sandboxing instead of real VMs (none
+  available in this environment). Covers userland/filesystem techniques only — see
+  `testbench/README.md`'s "Known gaps" for exactly what that excludes (process/network
+  scenarios, the DT_NEEDED-injection technique, anything kernel/eBPF-level) and what it'll
+  take to extend past it. PANIX/Atomic Red Team integration and real VM recipes remain
+  future work for whenever a kernel-level check needs them. `rules/` still doesn't exist.
 - **Package-hash baseline** (`internal/baseline` equivalent) — still the biggest structural gap
   per `CLAUDE.md`. Everything in `persistence.rs`/`libraries.rs` today flags by heuristic
   (location, recency, duplication), not "is this file actually owned by the package that claims

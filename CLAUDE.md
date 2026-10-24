@@ -108,12 +108,18 @@ src/checks/gtfobins.rs    SUID/SGID binaries and sudoers-permitted commands cros
 Not yet started: `internal/collect` (shared raw collectors), `internal/crossview` (a real
 diff engine — today's cross-view logic lives inline in `network.rs`), `internal/baseline`
 (package-hash attribution — every persistence entry is currently flagged by recency/location
-heuristics only, not "is this owned by a package"), YARA/Sigma `rules/`, and `testbench/`.
+heuristics only, not "is this owned by a package"), YARA/Sigma `rules/`.
 Binary is still dynamically linked against glibc; switching the release build to the
 `x86_64-unknown-linux-musl` target (per rule #2 above) is outstanding. PAM module hashing and
 BPF-program enumeration (§3.3/§3.6 in SPEC.md) have no check yet. ELF parsing in
 `libraries.rs` only handles ELF64 little-endian (x86_64/arm64, per SPEC.md §1 scope) — 32-bit
 and big-endian binaries are skipped, not flagged as a gap, since they're out of scope.
+
+`testbench/` exists now (`./testbench/run.sh`): 6 scenarios, using unprivileged bubblewrap
+sandboxing rather than real VMs since this environment has no vagrant/libvirt (qemu +
+/dev/kvm are available if that changes). Covers userland/filesystem techniques only — see
+`testbench/README.md` for exactly why that's the current boundary and what it'll take to
+extend past it (real VMs, once a kernel/eBPF-level check exists to need one).
 
 The anonymous-RWX-mapping check (`processes.rs`) is deliberately Medium, not Critical: it's the
 same shape as libffi closure trampolines (ubiquitous in GTK/GObject-Introspection/Python ctypes

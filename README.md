@@ -167,6 +167,20 @@ timer (`watch`), turns each `skipped` list into a `Coverage` entry, and
 renders both. Adding a new detector means adding a new module and one
 line in `all_checks()` — no other wiring required.
 
+## Testing
+
+```sh
+cargo test              # unit tests (parsers, ELF reader, sudoers logic, ...)
+./testbench/run.sh      # regression tests: plant a real technique, assert hunter catches it
+```
+
+The testbench plants techniques in an unprivileged
+[bubblewrap](https://github.com/containers/bubblewrap) sandbox — a fresh mount/pid/network
+namespace per scenario, real host filesystem mounted read-only, nothing it does can touch
+the real system. See [`testbench/README.md`](testbench/README.md) for how that works and
+its current scope (userland/filesystem techniques only; needs real VMs once a kernel-level
+check exists).
+
 ## Documentation
 
 - [`FUTURE_AVENUES.md`](FUTURE_AVENUES.md) — bigger/speculative directions
