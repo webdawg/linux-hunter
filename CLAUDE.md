@@ -9,6 +9,8 @@ application and is designed so a rootkit cannot simply lie to it.
 | File | What it is |
 | --- | --- |
 | `docs/SPEC.md` | The product specification — architecture, modules, requirements, roadmap |
+| `docs/VERIFICATION_SPEC.md` | External audit contract (adversary model, evidence/coverage rules, release gates) this codebase is measured against — read before claiming any requirement is met |
+| `docs/VERIFICATION_MATRIX.md` | Requirement-to-code traceability audit against the above, with real code/test evidence per row — **check this before assuming a capability exists** |
 | `docs/research/persistence-techniques.md` | Catalog of known Linux autostart / persistence tricks: where they live, real-world users, how to detect them |
 | `docs/research/hiding-techniques.md` | Catalog of how attackers hide processes, files, network traffic, modules, logs and the malware itself |
 | `docs/research/malware-case-studies.md` | Real malware families (2014 → Oct 2026) mapped to the techniques they used |
@@ -16,6 +18,12 @@ application and is designed so a rootkit cannot simply lie to it.
 
 The research catalogs are the **detection backlog**: every row should eventually map to at
 least one check in the codebase and one scenario in the test bench.
+
+`docs/VERIFICATION_SPEC.md`'s own instruction applies to every session, not just the one that
+first audited against it: never infer implementation from a function name, comment, dependency,
+or empty test. Before claiming a requirement ID is met, re-check `VERIFICATION_MATRIX.md` is
+still accurate against current code — it will drift as checks are added or changed, and a
+stale IMPLEMENTED-VERIFIED row is worse than an honest MISSING one.
 
 ## Non-negotiable engineering rules
 
@@ -144,8 +152,41 @@ Coverage honesty (rule #9) is implemented: `Check::run()` returns a `CheckOutput
 report and JSON output — a clean non-root scan should show `network`/`processes`/`accounts` as
 `PARTIAL`, never silently clean.
 
-Phase 1 progress against the build order: persistence enumeration, socket cross-view, and
-accounts now have a first pass. Still open: PAM module hashing, udev `RUN+=`/`PROGRAM=`
-attribution beyond recency, BPF-program checks, and package-hash attribution for every
-persistence/SUID entry (today's checks flag by heuristic, not by "is this owned by a
-package").
+Phase 1 progress against the build order: persistence enumeration, socket cross-view, accounts,
+PAM, and GTFOBins now have a first pass. Still open: udev `RUN+=`/`PROGRAM=` attribution beyond
+recency, BPF-program checks, and package-hash attribution for every persistence/SUID/PAM-module
+entry (today's checks flag by heuristic, not by "is this owned by a package").
+
+## 2026-10-24 verification audit
+
+`docs/VERIFICATION_SPEC.md` (an external audit contract) was supplied and audited against this
+codebase in full; the result is `docs/VERIFICATION_MATRIX.md` — read that before assuming any
+capability exists or doesn't. Four real P0-caliber issues were found and fixed in the same
+session, each with regression tests, two of them confirmed by direct reproduction before being
+fixed (not just reasoned about):
+
+1. **Implicit-clean framing** (`TR-10`) — a zero-finding scan had no hedge above the coverage
+   section. Fixed: `Report::statement` (`main.rs`), always present, always names what's
+   incomplete, text and JSON.
+2. **Unbounded/symlink-following recursion** (`FS-04`) — `persistence.rs`'s autostart-tree
+   walker followed directory symlinks at every depth with no explicit bound (self-limited only
+   by `PATH_MAX`, by accident, confirmed empirically — not a crash, but not a real bound
+   either). Fixed: depth-0-only symlink-following (keeps dotfile-manager setups working) plus
+   an explicit `MAX_SCAN_DEPTH`.
+3. **Terminal-escape injection** (`SC-06`) — finding text embeds raw, user-controlled filenames
+   and (in `pam.rs`) raw config-line text, printed unescaped. Fixed: `sanitize_for_terminal` at
+   the text-rendering boundary in `main.rs`; JSON output is left alone since `serde_json`
+   already escapes control characters safely and raw bytes should survive there (EV-04).
+4. **ELF parser panic on crafted input** (`SC-01`) — the most serious: `libraries.rs`'s
+   dynamic-section parser used `.unwrap()` and raw pointer arithmetic throughout. A crafted
+   `PT_DYNAMIC` offset reproducibly panicked the whole process (confirmed with a standalone
+   repro before fixing) — a real "attack the scanner" vector, since this parser runs against
+   real binaries at fixed paths an attacker who's already compromised the host could replace.
+   Fixed: `checked_add`/`checked_mul` throughout, `Option`-returning byte readers.
+
+Top gaps the audit surfaced but did **not** fix (see the matrix's closing section for the full,
+prioritized list): no `catch_unwind` boundary around individual checks (today's fixes closed
+the two known panic paths, not the general class); no package-hash baseline (`FS-01`, already
+tracked, the root cause behind most "heuristic, not exhaustive" caveats); no container/chroot
+detection (`PL-04`); BPF enumeration has no check despite being named Phase-1 scope in
+`docs/SPEC.md`; no incident-response runbook (`IR-*`) exists at all.

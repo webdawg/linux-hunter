@@ -213,6 +213,13 @@ const DT_RUNPATH: i64 = 29;
 /// `Ok(None)` for anything that isn't a recognized ELF64 LE file (e.g. a
 /// `#!/bin/sh` wrapper script, or a 32-bit/big-endian binary -- out of
 /// scope per SPEC.md §1, x86_64/arm64 only).
+/// Returns `Ok(None)` both for "not an ELF64-LE file" (not a bug) and for
+/// "an ELF64-LE file whose internal offsets don't add up" (a malformed or
+/// truncated file -- also not a bug: every offset read from the file is
+/// bounds-checked via the `Option`-returning helpers and `checked_add`
+/// below, so a crafted/corrupted binary makes this function give up and
+/// return `None`, not panic the process). See the regression tests at the
+/// bottom of this file for the specific shapes this guards against.
 fn read_elf_dynamic(path: &Path) -> Result<Option<DynInfo>> {
     let data = fs::read(path)?;
     if data.len() < 64 || &data[0..4] != b"\x7fELF" {
@@ -225,49 +232,54 @@ fn read_elf_dynamic(path: &Path) -> Result<Option<DynInfo>> {
         return Ok(None);
     }
 
-    let e_phoff = read_u64(&data, 0x20) as usize;
-    let e_phentsize = read_u16(&data, 0x36) as usize;
-    let e_phnum = read_u16(&data, 0x38) as usize;
+    let Some(dyn_info) = parse_dynamic_section(&data) else {
+        return Ok(None);
+    };
+    Ok(Some(dyn_info))
+}
+
+fn parse_dynamic_section(data: &[u8]) -> Option<DynInfo> {
+    let e_phoff = read_u64(data, 0x20)? as usize;
+    let e_phentsize = read_u16(data, 0x36)? as usize;
+    let e_phnum = read_u16(data, 0x38)? as usize;
 
     let mut dyn_off = None;
     let mut dyn_size = None;
     let mut load_segments = Vec::new();
 
     for i in 0..e_phnum {
-        let off = e_phoff + i * e_phentsize;
-        if off + 56 > data.len() {
+        let off = e_phoff.checked_add(i.checked_mul(e_phentsize)?)?;
+        if off.checked_add(56)? > data.len() {
             break;
         }
-        let p_type = read_u32(&data, off);
-        let p_offset = read_u64(&data, off + 8);
-        let p_vaddr = read_u64(&data, off + 16);
-        let p_filesz = read_u64(&data, off + 32);
-        let p_memsz = read_u64(&data, off + 40);
+        let p_type = read_u32(data, off)?;
+        let p_offset = read_u64(data, off.checked_add(8)?)?;
+        let p_vaddr = read_u64(data, off.checked_add(16)?)?;
+        let p_filesz = read_u64(data, off.checked_add(32)?)?;
+        let p_memsz = read_u64(data, off.checked_add(40)?)?;
 
         if p_type == PT_DYNAMIC {
-            dyn_off = Some(p_offset as usize);
-            dyn_size = Some(p_filesz as usize);
+            dyn_off = Some(usize::try_from(p_offset).ok()?);
+            dyn_size = Some(usize::try_from(p_filesz).ok()?);
         } else if p_type == PT_LOAD {
             load_segments.push((p_vaddr, p_memsz, p_offset));
         }
     }
 
-    let (Some(dyn_off), Some(dyn_size)) = (dyn_off, dyn_size) else {
-        return Ok(None); // statically linked: no PT_DYNAMIC, nothing to check
-    };
+    let (dyn_off, dyn_size) = (dyn_off?, dyn_size?); // statically linked: no PT_DYNAMIC, nothing to check
 
     let mut strtab_vaddr = None;
     let mut needed_str_offsets = Vec::new();
     let mut rpath_str_offset = None;
 
-    let mut i = 0;
-    while i + 16 <= dyn_size {
-        let off = dyn_off + i;
-        if off + 16 > data.len() {
+    let mut i = 0usize;
+    while i.checked_add(16)? <= dyn_size {
+        let off = dyn_off.checked_add(i)?;
+        if off.checked_add(16)? > data.len() {
             break;
         }
-        let tag = read_u64(&data, off) as i64;
-        let val = read_u64(&data, off + 8);
+        let tag = read_u64(data, off)? as i64;
+        let val = read_u64(data, off.checked_add(8)?)?;
         if tag == DT_NULL {
             break;
         }
@@ -277,44 +289,185 @@ fn read_elf_dynamic(path: &Path) -> Result<Option<DynInfo>> {
             DT_RPATH | DT_RUNPATH => rpath_str_offset = Some(val),
             _ => {}
         }
-        i += 16;
+        i = i.checked_add(16)?;
     }
 
-    let Some(strtab_vaddr) = strtab_vaddr else {
-        return Ok(None);
-    };
-    let Some(strtab_file_off) = vaddr_to_file_offset(&load_segments, strtab_vaddr) else {
-        return Ok(None);
-    };
+    let strtab_file_off = vaddr_to_file_offset(&load_segments, strtab_vaddr?)?;
 
-    let needed = needed_str_offsets.into_iter().filter_map(|rel| read_cstr(&data, strtab_file_off + rel as usize)).collect();
-    let rpath = rpath_str_offset.and_then(|rel| read_cstr(&data, strtab_file_off + rel as usize));
+    let needed = needed_str_offsets
+        .into_iter()
+        .filter_map(|rel| strtab_file_off.checked_add(usize::try_from(rel).ok()?).and_then(|o| read_cstr(data, o)))
+        .collect();
+    let rpath = rpath_str_offset
+        .and_then(|rel| strtab_file_off.checked_add(usize::try_from(rel).ok()?))
+        .and_then(|o| read_cstr(data, o));
 
-    Ok(Some(DynInfo { needed, rpath }))
+    Some(DynInfo { needed, rpath })
 }
 
 fn vaddr_to_file_offset(load_segments: &[(u64, u64, u64)], vaddr: u64) -> Option<usize> {
     for &(seg_vaddr, seg_memsz, seg_offset) in load_segments {
-        if vaddr >= seg_vaddr && vaddr < seg_vaddr + seg_memsz {
-            return Some((seg_offset + (vaddr - seg_vaddr)) as usize);
+        let seg_end = seg_vaddr.checked_add(seg_memsz)?;
+        if vaddr >= seg_vaddr && vaddr < seg_end {
+            let file_off = seg_offset.checked_add(vaddr.checked_sub(seg_vaddr)?)?;
+            return usize::try_from(file_off).ok();
         }
     }
     None
 }
 
 fn read_cstr(data: &[u8], offset: usize) -> Option<String> {
-    let end = data[offset..].iter().position(|&b| b == 0)? + offset;
-    String::from_utf8(data[offset..end].to_vec()).ok()
+    let rest = data.get(offset..)?;
+    let end = rest.iter().position(|&b| b == 0)?;
+    String::from_utf8(rest.get(..end)?.to_vec()).ok()
 }
 
-fn read_u16(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap())
+/// All three readers below return `None` rather than panicking on a bad
+/// offset. This file reads untrusted ELF files -- real binaries the
+/// scan walks, which on an already-compromised host could be deliberately
+/// malformed specifically to crash the scanner -- so every offset here is
+/// attacker-influenced. Bounds checks must use `checked_add`/`slice::get`
+/// rather than raw `+`/indexing: both panic on overflow/out-of-range (the
+/// former only in debug builds, the latter in both), and this file's own
+/// `read_elf_dynamic` was built with raw `+` and `.unwrap()` here
+/// originally -- a crafted PT_DYNAMIC segment with a large `p_offset` (or
+/// a DT_NEEDED value picked to push a later offset near `usize::MAX`)
+/// could panic the whole process, not just fail this one check. See the
+/// malformed-ELF regression tests at the bottom of this file.
+fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    Some(u16::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
 }
 
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
 }
 
-fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
+fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
+    let end = offset.checked_add(8)?;
+    Some(u64::from_le_bytes(data.get(offset..end)?.try_into().ok()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hand-builds a minimal, otherwise-valid ELF64-LE file with one
+    /// PT_LOAD segment (vaddr 0 == file offset 0, covering the whole
+    /// file) and one PT_DYNAMIC segment containing `needed` as DT_NEEDED
+    /// entries (as (value, string) pairs so a test can plant an
+    /// out-of-range value deliberately) plus a terminating DT_NULL.
+    fn build_minimal_elf(needed: &[(u64, &str)]) -> Vec<u8> {
+        let mut strtab = vec![0u8]; // leading NUL, like a real strtab
+        let mut needed_entries: Vec<(u64, u64)> = Vec::new(); // (tag_val, resolved_rel_offset) pairs we'll override below
+        for &(forced_val, name) in needed {
+            let rel = if forced_val != 0 { forced_val } else { strtab.len() as u64 };
+            if forced_val == 0 {
+                strtab.extend_from_slice(name.as_bytes());
+                strtab.push(0);
+            }
+            needed_entries.push((1, rel)); // DT_NEEDED tag = 1
+        }
+
+        const EHDR_SIZE: usize = 64;
+        const PHDR_SIZE: usize = 56;
+        let phdr_count = 2; // PT_LOAD, PT_DYNAMIC
+        let phdrs_end = EHDR_SIZE + phdr_count * PHDR_SIZE;
+        let dyn_off = phdrs_end;
+        let dyn_entry_count = needed_entries.len() + 2; // + DT_STRTAB + DT_NULL
+        let dyn_size = dyn_entry_count * 16;
+        let strtab_off = dyn_off + dyn_size;
+        let total_len = strtab_off + strtab.len();
+
+        let mut data = vec![0u8; total_len];
+        data[0..4].copy_from_slice(b"\x7fELF");
+        data[4] = 2; // ELFCLASS64
+        data[5] = 1; // ELFDATA2LSB
+        data[0x20..0x28].copy_from_slice(&(EHDR_SIZE as u64).to_le_bytes()); // e_phoff
+        data[0x36..0x38].copy_from_slice(&(PHDR_SIZE as u16).to_le_bytes()); // e_phentsize
+        data[0x38..0x3a].copy_from_slice(&(phdr_count as u16).to_le_bytes()); // e_phnum
+
+        // PT_LOAD: p_offset=0, p_vaddr=0, p_filesz=p_memsz=total_len.
+        let load_off = EHDR_SIZE;
+        data[load_off..load_off + 4].copy_from_slice(&1u32.to_le_bytes()); // p_type = PT_LOAD
+        data[load_off + 8..load_off + 16].copy_from_slice(&0u64.to_le_bytes()); // p_offset
+        data[load_off + 16..load_off + 24].copy_from_slice(&0u64.to_le_bytes()); // p_vaddr
+        data[load_off + 32..load_off + 40].copy_from_slice(&(total_len as u64).to_le_bytes()); // p_filesz
+        data[load_off + 40..load_off + 48].copy_from_slice(&(total_len as u64).to_le_bytes()); // p_memsz
+
+        // PT_DYNAMIC: p_offset=p_vaddr=dyn_off, p_filesz=p_memsz=dyn_size.
+        let dynhdr_off = EHDR_SIZE + PHDR_SIZE;
+        data[dynhdr_off..dynhdr_off + 4].copy_from_slice(&2u32.to_le_bytes()); // p_type = PT_DYNAMIC
+        data[dynhdr_off + 8..dynhdr_off + 16].copy_from_slice(&(dyn_off as u64).to_le_bytes());
+        data[dynhdr_off + 16..dynhdr_off + 24].copy_from_slice(&(dyn_off as u64).to_le_bytes());
+        data[dynhdr_off + 32..dynhdr_off + 40].copy_from_slice(&(dyn_size as u64).to_le_bytes());
+        data[dynhdr_off + 40..dynhdr_off + 48].copy_from_slice(&(dyn_size as u64).to_le_bytes());
+
+        // Dynamic entries: one DT_NEEDED per `needed`, then DT_STRTAB, then DT_NULL.
+        let mut off = dyn_off;
+        for &(tag, val) in &needed_entries {
+            data[off..off + 8].copy_from_slice(&(tag as u64).to_le_bytes());
+            data[off + 8..off + 16].copy_from_slice(&val.to_le_bytes());
+            off += 16;
+        }
+        data[off..off + 8].copy_from_slice(&5u64.to_le_bytes()); // DT_STRTAB
+        data[off + 8..off + 16].copy_from_slice(&(strtab_off as u64).to_le_bytes());
+        off += 16;
+        data[off..off + 8].copy_from_slice(&0u64.to_le_bytes()); // DT_NULL
+        off += 16;
+        let _ = off;
+
+        data[strtab_off..strtab_off + strtab.len()].copy_from_slice(&strtab);
+        data
+    }
+
+    #[test]
+    fn parses_a_well_formed_minimal_elf() {
+        let data = build_minimal_elf(&[(0, "libc.so.6"), (0, "libselinux.so.1")]);
+        let info = parse_dynamic_section(&data).expect("well-formed fixture should parse");
+        assert_eq!(info.needed, vec!["libc.so.6", "libselinux.so.1"]);
+        assert_eq!(info.rpath, None);
+    }
+
+    #[test]
+    fn truncated_file_returns_none_not_panic() {
+        let data = build_minimal_elf(&[(0, "libc.so.6")]);
+        // Cut it off partway through the program headers.
+        let truncated = &data[..70];
+        assert!(parse_dynamic_section(truncated).is_none());
+    }
+
+    #[test]
+    fn huge_phoff_does_not_panic_or_overflow() {
+        // The exact shape of the original bug: a crafted e_phoff near
+        // usize::MAX, which the old `e_phoff + i * e_phentsize` raw
+        // addition (and the old `.unwrap()`-based readers) would have
+        // panicked on -- taking the whole scan down, not just this check.
+        let mut data = build_minimal_elf(&[(0, "libc.so.6")]);
+        data[0x20..0x28].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(parse_dynamic_section(&data).is_none());
+    }
+
+    #[test]
+    fn huge_dt_needed_value_is_dropped_not_fatal() {
+        // One DT_NEEDED entry with an out-of-range string-table offset
+        // (what the real attack surface looks like: a legitimate ELF
+        // with one tampered dynamic entry) must not take down parsing of
+        // the rest of a perfectly normal dynamic section.
+        let data = build_minimal_elf(&[(0, "libc.so.6"), (u64::MAX, "unused")]);
+        let info = parse_dynamic_section(&data).expect("the rest of the file is well-formed");
+        assert_eq!(info.needed, vec!["libc.so.6"], "the malformed entry should be silently dropped, not panic or poison the whole result");
+    }
+
+    #[test]
+    fn huge_dyn_size_terminates_promptly() {
+        let mut data = build_minimal_elf(&[(0, "libc.so.6")]);
+        // PT_DYNAMIC's p_filesz, at dynhdr_off + 32.
+        let dynhdr_off = 64 + 56;
+        data[dynhdr_off + 32..dynhdr_off + 40].copy_from_slice(&u64::MAX.to_le_bytes());
+        // Must terminate (bounded by data.len(), not by dyn_size) and
+        // must not panic computing `i + 16` against a huge dyn_size.
+        let _ = parse_dynamic_section(&data);
+    }
 }

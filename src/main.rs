@@ -70,6 +70,12 @@ async fn main() -> Result<()> {
 struct Report {
     findings: Vec<Finding>,
     coverage: Vec<Coverage>,
+    /// A always-hedged, scope-limited summary of what this report does and
+    /// does not establish. Computed fresh every run from the actual
+    /// coverage data below, specifically so nothing (a renderer, a
+    /// downstream consumer, an empty findings list) can present a scan as
+    /// an unconditional clean bill of health. See `build_statement`.
+    statement: String,
 }
 
 fn run_all_checks() -> Report {
@@ -100,21 +106,75 @@ fn run_all_checks() -> Report {
         }
     }
     findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
-    Report { findings, coverage }
+    let statement = build_statement(&findings, &coverage);
+    Report { findings, coverage, statement }
+}
+
+/// Builds a scope-limited summary that can never read as an unconditional
+/// "clean" verdict, however the findings/coverage turn out. A platform
+/// this tool was explicitly asked to never claim: kernel compromise,
+/// firmware/boot tampering, and memory-resident code outside what the
+/// implemented checks look at are never ruled out by a passing scan --
+/// `hunter` is Phase 1 (live userland/filesystem triage) of a larger
+/// design (docs/SPEC.md), not an attestation system, and every check it
+/// runs is still mediated by the host's own kernel (CLAUDE.md rule #1
+/// reduces *tampering risk* in how we collect evidence; it does not
+/// bypass a compromised kernel, which could still misreport what this
+/// process observes).
+fn build_statement(findings: &[Finding], coverage: &[Coverage]) -> String {
+    let total = coverage.len();
+    let complete = coverage.iter().filter(|c| c.status == CoverageStatus::Ran).count();
+    let incomplete: Vec<&str> = coverage.iter().filter(|c| c.status != CoverageStatus::Ran).map(|c| c.check).collect();
+
+    let coverage_clause = if incomplete.is_empty() {
+        format!("all {total} implemented checks completed with full coverage")
+    } else {
+        format!("{complete} of {total} implemented checks completed with full coverage ({} partial or failed: {})", incomplete.len(), incomplete.join(", "))
+    };
+
+    let findings_clause = if findings.is_empty() {
+        "no anomalies were reported by the checks that ran".to_string()
+    } else {
+        format!("{} finding(s) were reported and need human review", findings.len())
+    };
+
+    format!(
+        "{coverage_clause}; {findings_clause}. This does NOT establish the host is free of \
+         compromise: every check here reads through the host's own kernel (a compromised \
+         kernel could misreport what's observed), covers only userland/filesystem artifacts \
+         implemented so far, and has no package-hash baseline, kernel/memory verification, \
+         boot/firmware attestation, or external corroboration behind it yet. See CLAUDE.md's \
+         \"Current implementation status\" for exactly what is and isn't covered."
+    )
 }
 
 fn print_report(report: &Report, json: bool) {
     if json {
+        // serde_json escapes control characters ( etc.) as part of
+        // normal JSON string syntax, so this path is already safe without
+        // sanitize_for_terminal -- and preserving the raw bytes here,
+        // unlike the text path below, is the point (EV-04: preserve raw
+        // evidence; a consumer parsing this JSON should see exactly what
+        // was on disk, not a human-readability transform).
         println!("{}", serde_json::to_string_pretty(report).unwrap_or_default());
         return;
     }
 
+    // Finding summaries/details embed raw filenames and, in some checks,
+    // raw config-file line text -- both are attacker- or unprivileged-
+    // user-controlled in general (anything under a scanned home directory,
+    // for instance). Printed unescaped to a real terminal, a crafted
+    // filename containing ANSI escapes could reposition the cursor, hide
+    // or rewrite displayed text, or change the window title -- a local
+    // user attacking whoever reviews a root-run scan's output. Sanitized
+    // here, at the presentation boundary, rather than in every check that
+    // constructs a Finding, so nothing has to remember to do this itself.
     if report.findings.is_empty() {
         println!("No findings.");
     } else {
         for finding in &report.findings {
-            println!("[{}] ({}) {}", finding.severity, finding.check, finding.summary);
-            println!("    {}\n", finding.detail.replace('\n', "\n    "));
+            println!("[{}] ({}) {}", finding.severity, finding.check, sanitize_for_terminal(&finding.summary));
+            println!("    {}\n", sanitize_for_terminal(&finding.detail).replace('\n', "\n    "));
         }
         println!("{} finding(s).", report.findings.len());
     }
@@ -128,8 +188,86 @@ fn print_report(report: &Report, json: bool) {
         };
         println!("  [{marker}] {}", entry.check);
         if !entry.detail.is_empty() {
-            println!("      {}", entry.detail);
+            println!("      {}", sanitize_for_terminal(&entry.detail));
         }
+    }
+
+    println!("\n{}", sanitize_for_terminal(&report.statement));
+}
+
+/// Escapes control characters (the C0 set including ESC/CR, DEL, and the
+/// C1 set) to their visible `\u{..}` form so untrusted text embedded in a
+/// finding can't manipulate the terminal it's printed to. Newlines and
+/// tabs pass through unescaped since findings legitimately use them for
+/// readability (e.g. multi-line file contents in a detail string).
+fn sanitize_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use report::CoverageStatus;
+
+    #[test]
+    fn statement_never_claims_clean_even_with_zero_findings_and_full_coverage() {
+        // The exact "false-clean" shape this exists to prevent: no
+        // findings, every check fully ran. The statement must still say
+        // this doesn't establish the host is clean.
+        let coverage = vec![Coverage { check: "processes", status: CoverageStatus::Ran, detail: String::new() }];
+        let statement = build_statement(&[], &coverage);
+        assert!(statement.contains("does NOT establish"), "statement: {statement}");
+        assert!(statement.contains("all 1 implemented checks completed"), "statement: {statement}");
+    }
+
+    #[test]
+    fn statement_names_which_checks_are_incomplete() {
+        let coverage = vec![
+            Coverage { check: "processes", status: CoverageStatus::Ran, detail: String::new() },
+            Coverage { check: "network", status: CoverageStatus::Partial, detail: "some pids denied".to_string() },
+            Coverage { check: "accounts", status: CoverageStatus::Failed, detail: "boom".to_string() },
+        ];
+        let statement = build_statement(&[], &coverage);
+        assert!(statement.contains("1 of 3"), "statement: {statement}");
+        assert!(statement.contains("network"), "statement: {statement}");
+        assert!(statement.contains("accounts"), "statement: {statement}");
+    }
+
+    #[test]
+    fn statement_reports_finding_count_when_present() {
+        let coverage = vec![Coverage { check: "pam", status: CoverageStatus::Ran, detail: String::new() }];
+        let findings = vec![Finding::new("pam", Severity::High, "test finding", "detail")];
+        let statement = build_statement(&findings, &coverage);
+        assert!(statement.contains("1 finding(s) were reported"), "statement: {statement}");
+    }
+
+    #[test]
+    fn sanitize_escapes_ansi_and_other_control_chars() {
+        let hostile = "normal\x1b[2J\x1b[31mFAKE CRITICAL FINDING\x1b[0m\rtext";
+        let clean = sanitize_for_terminal(hostile);
+        assert!(!clean.contains('\x1b'), "raw ESC must not survive: {clean:?}");
+        assert!(!clean.contains('\r'), "raw CR must not survive: {clean:?}");
+        assert!(clean.contains("\\u{1b}"), "escaped form should be visible: {clean:?}");
+    }
+
+    #[test]
+    fn sanitize_preserves_newlines_and_tabs() {
+        let text = "line one\n\tindented line two";
+        assert_eq!(sanitize_for_terminal(text), text);
+    }
+
+    #[test]
+    fn sanitize_leaves_ordinary_text_untouched() {
+        let text = "pid 1234 is executing out of /tmp, exe: /tmp/evil (deleted)";
+        assert_eq!(sanitize_for_terminal(text), text);
     }
 }
 

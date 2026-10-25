@@ -195,6 +195,14 @@ check exists).
 
 ## Documentation
 
+- [`docs/VERIFICATION_SPEC.md`](docs/VERIFICATION_SPEC.md) — an external audit
+  contract (adversary model, evidence/coverage rules, release gates) this
+  project is measured against, and
+  [`docs/VERIFICATION_MATRIX.md`](docs/VERIFICATION_MATRIX.md) — the honest
+  requirement-to-code audit against it, including four real bugs found and
+  fixed (a process-crashing malformed-ELF panic, an unbounded symlink-loop
+  traversal, a terminal-escape injection in finding output, and a scan that
+  could read as an implicit "clean" verdict).
 - [`FUTURE_AVENUES.md`](FUTURE_AVENUES.md) — bigger/speculative directions
   (research-ingestion pipeline, GTFOBins-aware checks, a real network
   analysis tool, threat-intel integrations, optional Claude API use)

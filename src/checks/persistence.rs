@@ -202,6 +202,14 @@ fn check_rc_local(out: &mut CheckOutput) {
     }
 }
 
+/// Hard cap on recursion depth while walking an autostart tree. Belt and
+/// suspenders alongside not following directory symlinks (see
+/// `scan_recent`): real autostart trees are 2-3 levels deep at most, so
+/// this never affects a legitimate scan, but it means depth is bounded by
+/// something we actually chose rather than by `PATH_MAX` happening to
+/// error out `fs::read_dir` first.
+const MAX_SCAN_DEPTH: u32 = 40;
+
 fn check_autostart_trees(out: &mut CheckOutput) {
     for (label, paths) in AUTOSTART_TREES {
         debug!(label, ?paths, "walking autostart tree for recently-modified entries");
@@ -212,21 +220,59 @@ fn check_autostart_trees(out: &mut CheckOutput) {
 }
 
 fn scan_recent(label: &str, path: &Path, out: &mut CheckOutput) {
-    let Ok(meta) = fs::metadata(path) else {
+    scan_recent_at_depth(label, path, 0, out);
+}
+
+/// Walks `path` for recently-modified entries. Deliberately does not
+/// follow directory symlinks while recursing (checked via
+/// `symlink_metadata`, which -- unlike `metadata` -- reports the link
+/// itself rather than its target): a planted symlink loop under any
+/// user's home directory (e.g. `~/.config/autostart/x -> ..`, which an
+/// unprivileged account can create on its own, and which this function
+/// scans for every account via `check_xdg_autostart`) would otherwise
+/// recurse until `fs::read_dir` finally errors out past `PATH_MAX` --
+/// self-limiting by accident, not by anything this function actually
+/// decided -- and a symlink pointing *out* of the intended tree (e.g. at
+/// `/`) would otherwise make us recursively scan whatever it points to
+/// as if it belonged to this persistence location. `MAX_SCAN_DEPTH` is a
+/// second, independent bound in case either assumption above is wrong.
+fn scan_recent_at_depth(label: &str, path: &Path, depth: u32, out: &mut CheckOutput) {
+    if depth > MAX_SCAN_DEPTH {
+        debug!(path = %path.display(), depth, "hit MAX_SCAN_DEPTH — not descending further");
+        return;
+    }
+
+    // Only the entry point (depth 0 -- a path *we* constructed, from
+    // AUTOSTART_TREES or a home directory looked up in /etc/passwd) is
+    // allowed to be a symlink and followed: that covers dotfile-manager
+    // setups that symlink a whole config directory into place (e.g.
+    // `~/.config/autostart -> ~/dotfiles/autostart`, common with GNU
+    // Stow/chezmoi), which skipping unconditionally would have silently
+    // stopped scanning entirely. Anything found *during* recursion
+    // (depth > 0) is attacker/unprivileged-user-plantable, so those are
+    // checked with symlink_metadata (not followed) instead.
+    let Ok(link_meta) = (if depth == 0 { fs::metadata(path) } else { fs::symlink_metadata(path) }) else {
         debug!(path = %path.display(), "path does not exist — skipping");
         return;
     };
 
-    if meta.is_dir() {
-        debug!(path = %path.display(), "descending into directory");
+    if depth > 0 && link_meta.is_symlink() {
+        debug!(path = %path.display(), "symlink found during recursion — not followed (avoids traversal loops/escapes); skipping");
+        return;
+    }
+
+    if link_meta.is_dir() {
+        debug!(path = %path.display(), depth, "descending into directory");
         let Ok(entries) = fs::read_dir(path) else {
             return;
         };
         for entry in entries.flatten() {
-            scan_recent(label, &entry.path(), out);
+            scan_recent_at_depth(label, &entry.path(), depth + 1, out);
         }
         return;
     }
+
+    let meta = link_meta;
 
     if let Ok(modified) = meta.modified()
         && let Ok(age) = SystemTime::now().duration_since(modified)
@@ -350,5 +396,75 @@ fn humanize(secs: u64) -> String {
         format!("{}h", secs / 3600)
     } else {
         format!("{}d", secs / 86400)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn scan_recent_terminates_on_a_cyclic_directory_symlink() {
+        // Regression test for the original (pre-fix) scan_recent: it used
+        // fs::metadata (which follows symlinks) at every depth with no
+        // explicit bound, so a directory symlink pointing back at an
+        // ancestor -- trivially plantable by an unprivileged user under
+        // their own ~/.config/autostart, which persistence.rs scans for
+        // every account -- recursed until fs::read_dir finally errored
+        // past PATH_MAX (confirmed empirically: ~900 levels, not a true
+        // infinite loop or crash, but an implicit OS-constant bound this
+        // function never actually chose -- see MAX_SCAN_DEPTH's doc
+        // comment). This test's real job now is to prove the depth cap
+        // and non-following-during-recursion fix both still work; it
+        // hanging or panicking is the failure mode to watch for.
+        let tmp = std::env::temp_dir().join(format!("hunter-test-symloop-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        symlink(&tmp, tmp.join("loop")).unwrap();
+
+        let mut out = CheckOutput::new();
+        // If this regresses, the test hangs/crashes rather than failing
+        // cleanly -- that's the point: termination itself is the assertion.
+        scan_recent("test", &tmp, &mut out);
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn entry_point_symlink_is_followed_but_nested_symlink_is_not() {
+        // The dotfile-manager case (depth 0, a path we constructed) must
+        // still work: ~/.config/autostart -> ~/dotfiles/autostart should
+        // be scanned normally, not silently skipped. But a symlink
+        // *found while recursing* (depth > 0, attacker/user-plantable)
+        // must not be followed, or this fix would just trade "loops on
+        // self-referential symlinks" for "still escapable via a two-hop
+        // symlink planted one level deeper."
+        let tmp = std::env::temp_dir().join(format!("hunter-test-symfollow-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let real_target = tmp.join("real_target");
+        let outside = tmp.join("outside");
+        fs::create_dir_all(&real_target).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.conf"), "should not be reached").unwrap();
+        symlink(&outside, real_target.join("nested_link")).unwrap();
+        fs::write(real_target.join("recent.txt"), "reachable via the depth-0 symlink").unwrap();
+        let entry_point = tmp.join("entry_point");
+        symlink(&real_target, &entry_point).unwrap();
+
+        let mut out = CheckOutput::new();
+        scan_recent("test", &entry_point, &mut out);
+
+        let summaries: Vec<&str> = out.findings.iter().map(|f| f.summary.as_str()).collect();
+        assert!(
+            summaries.iter().any(|s| s.contains("recent.txt")),
+            "a file reached only via the depth-0 entry-point symlink should still be found: {summaries:?}"
+        );
+        assert!(
+            !summaries.iter().any(|s| s.contains("secret.conf")),
+            "a file reached only via a symlink found *during* recursion must not be followed: {summaries:?}"
+        );
+
+        fs::remove_dir_all(&tmp).unwrap();
     }
 }
