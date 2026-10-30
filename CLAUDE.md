@@ -116,17 +116,30 @@ src/checks/pam.rs         unrecognized PAM modules (curated allowlist, not a bas
                            /etc/pam.d/* -- allowlist tuned against a real host's full pam.d
                            (not just one file) after su/rlogin's standard pam_rootok.so/
                            pam_rhosts.so sufficient lines false-positived at High severity
+src/checks/baseline.rs    "rogue software": executables in standard system dirs not owned by
+                           any installed package, per pacman's/dpkg's own local databases
+                           parsed directly (no shelling out). Ownership only, not yet
+                           integrity (no per-file hash comparison) -- see FS-01 in the matrix.
 ```
 
 Not yet started: `internal/collect` (shared raw collectors), `internal/crossview` (a real
-diff engine — today's cross-view logic lives inline in `network.rs`), `internal/baseline`
-(package-hash attribution — every persistence entry is currently flagged by recency/location
-heuristics only, not "is this owned by a package"), YARA/Sigma `rules/`.
+diff engine — today's cross-view logic lives inline in `network.rs`), per-file hash
+verification for package-owned files (pacman's `.MTREE` is gzip-compressed BSD mtree, needs a
+DEFLATE dependency; dpkg has no per-file hashes in its base format; RPM's binary database is
+unsupported entirely), YARA/Sigma `rules/`. No existing check (persistence/libraries/accounts/
+pam) consults `baseline.rs`'s ownership set yet — each still flags by its own heuristic.
 Binary is still dynamically linked against glibc; switching the release build to the
 `x86_64-unknown-linux-musl` target (per rule #2 above) is outstanding. BPF-program
 enumeration (§3.3 in SPEC.md) has no check yet. ELF parsing in `libraries.rs` only handles
 ELF64 little-endian (x86_64/arm64, per SPEC.md §1 scope) — 32-bit and big-endian binaries are
 skipped, not flagged as a gap, since they're out of scope.
+
+`baseline.rs`'s unowned-executable severity is split by location: High for `/usr/bin`,
+`/usr/sbin`, `/bin`, `/sbin` (should be ~100% package-owned on any stock install); Low for
+`/usr/local/{bin,sbin}` (the FHS-designated home for software installed outside the package
+manager -- flagging it at the same severity as the system dirs would make this check noisy on
+every host that's ever run `make install`, a predictable false positive avoided before it ever
+shipped, not discovered live).
 
 The PAM `sufficient`-module check (`pam.rs`) is Medium, not High, for the same reason the
 RWX-mapping check is Medium not Critical: real testing against a live host surfaced
@@ -153,9 +166,11 @@ report and JSON output — a clean non-root scan should show `network`/`processe
 `PARTIAL`, never silently clean.
 
 Phase 1 progress against the build order: persistence enumeration, socket cross-view, accounts,
-PAM, and GTFOBins now have a first pass. Still open: udev `RUN+=`/`PROGRAM=` attribution beyond
-recency, BPF-program checks, and package-hash attribution for every persistence/SUID/PAM-module
-entry (today's checks flag by heuristic, not by "is this owned by a package").
+PAM, GTFOBins, and a package-ownership baseline now have a first pass. Still open: udev
+`RUN+=`/`PROGRAM=` attribution beyond recency, BPF-program checks, and wiring the new
+ownership baseline into the other heuristic-only checks (persistence/SUID/PAM-module entries
+still flag by location/recency/name-list, not by package ownership) plus per-file hash
+verification for files that *are* package-owned.
 
 ## 2026-10-24 verification audit
 
@@ -190,3 +205,13 @@ the two known panic paths, not the general class); no package-hash baseline (`FS
 tracked, the root cause behind most "heuristic, not exhaustive" caveats); no container/chroot
 detection (`PL-04`); BPF enumeration has no check despite being named Phase-1 scope in
 `docs/SPEC.md`; no incident-response runbook (`IR-*`) exists at all.
+
+### 2026-10-30: FS-01 ownership baseline
+
+`src/checks/baseline.rs` landed: parses pacman's and dpkg's local package databases directly
+(plain text, no shelling out) and flags executables in standard system directories that no
+installed package owns — the "rogue software" case. Moves `FS-01` from MISSING to PARTIAL in
+`docs/VERIFICATION_MATRIX.md` (see that file's addendum for the detail) — the *ownership*
+question is answered, *integrity* (does a package-owned file's content still match what
+shipped) is not, and RPM remains unsupported. 10th testbench scenario
+(`rogue-unowned-binary`). Nothing else in the codebase consults this new ownership set yet.

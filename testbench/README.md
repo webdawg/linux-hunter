@@ -62,6 +62,7 @@ hidden framework state.
 | `pam-sufficient-permit` | `sufficient pam_permit.so` auth bypass pattern | `pam.rs::check_pam_config` |
 | `deleted-exe-process` | Process running from a binary deleted off disk | `processes.rs` (deleted-exe branch) |
 | `kernel-thread-masquerade` | Userspace process renamed via `prctl` to look like a kernel thread | `processes.rs` (`KERNEL_THREAD_NAME_PREFIXES`) |
+| `rogue-unowned-binary` | Dropped binary not owned by any installed package | `baseline.rs::check_unowned_executables` |
 
 Each scenario's own `README.md` names the exact research-doc row it corresponds to.
 `deleted-exe-process` and `kernel-thread-masquerade` are the first two that plant a live
@@ -85,9 +86,9 @@ file on the host so it survives the sandbox tearing down).
   hand-crafted ELF with a duplicate `DT_NEEDED` tag; `patchelf` isn't installed in this
   environment and wasn't worth blocking the rest of the testbench on. Tracked, not
   forgotten — this is the check most directly inspired by the 2600 article.
-- **Coverage, not exhaustiveness.** Nine scenarios prove the harness works end-to-end
-  and cover six of the seven check modules (`persistence`, `libraries`, `gtfobins`,
-  `accounts`, `pam`, `processes`); only `network` has zero scenarios now.
+- **Coverage, not exhaustiveness.** Ten scenarios prove the harness works end-to-end and
+  cover seven of the eight check modules (`persistence`, `libraries`, `gtfobins`,
+  `accounts`, `pam`, `processes`, `baseline`); only `network` has zero scenarios now.
 
 ## Adding a scenario
 

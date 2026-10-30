@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 pub mod accounts;
+pub mod baseline;
 pub mod gtfobins;
 pub mod libraries;
 pub mod network;
@@ -27,5 +28,6 @@ pub fn all_checks() -> Vec<Box<dyn Check>> {
         Box::new(libraries::LibraryCheck),
         Box::new(gtfobins::GtfobinsCheck),
         Box::new(pam::PamCheck),
+        Box::new(baseline::BaselineCheck),
     ]
 }

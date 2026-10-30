@@ -142,7 +142,7 @@ doesn't yet.
 
 | ID | Status | Priority | Code / Test | Notes |
 | --- | --- | --- | --- | --- |
-| FS-01 | MISSING | **P1** | — | **The single biggest structural gap in this codebase**, already tracked independently in `CLAUDE.md`'s "Current implementation status" and `FUTURE_AVENUES.md` §6 before this audit: there is no package-hash baseline at all. Every persistence/library/account/PAM check flags by heuristic (location, recency, permission bits, name-list membership) — never "is this file actually owned by the package that claims it." This is the root cause of most of the "heuristic, not exhaustive" caveats throughout this matrix. |
+| FS-01 | PARTIAL | **P1** | `src/checks/baseline.rs`; tests `parses_pacman_files_format`, `pacman_parser_stops_files_section_at_next_header`, `parses_dpkg_list_format`, `empty_pacman_db_dir_is_reported_as_a_coverage_gap`, `merged_usr_symlink_is_not_scanned_twice`; `testbench/scenarios/rogue-unowned-binary` | **Was the single biggest structural gap in this codebase** (originally flagged MISSING by this audit); the *ownership* half is now real: `baseline.rs` parses pacman's (`/var/lib/pacman/local/*/files`) and dpkg's (`/var/lib/dpkg/info/*.list`) local databases directly — plain text, never shelling out to `pacman`/`dpkg` — and flags executables in standard system directories that no installed package claims. Verified live against this host's real database (537,504 owned paths parsed) and via a testbench scenario planting a genuinely unowned binary. **Still missing, and the reason this is PARTIAL not IMPLEMENTED-VERIFIED**: the *integrity* half (does a package-owned file's content still match what the package shipped) is not built — that needs per-file hashes, which for pacman means parsing the gzip-compressed `.MTREE` per package (new work: a gzip/DEFLATE dependency plus BSD-mtree parsing) and dpkg doesn't carry per-file hashes in its base format at all. RPM (binary database, BerkeleyDB or sqlite depending on version) remains entirely unsupported and is reported honestly via a coverage-skip reason, not silently treated as clean. No other check (persistence/library/account/PAM) has been wired to consult this new ownership set yet — it stands alone as `baseline`'s own check for now, not yet used to upgrade the "heuristic, not exhaustive" caveats elsewhere in this matrix. |
 | FS-02 | PARTIAL | P1 | `src/checks/libraries.rs`, `gtfobins.rs`, `persistence.rs` | Covers libraries (shadow sonames, DT_NEEDED tampering), SUID binaries, and persistence scripts. No general "unexpected addition/deletion across the whole filesystem" sweep exists — only in the specific locations each check targets. |
 | FS-03 | PARTIAL | P1 | `src/checks/persistence.rs` (mode bits for world-writable checks, immutable flag via ioctl); `gtfobins.rs` (SUID/SGID mode bits) | Mode bits and the immutable flag are read directly (not via `lsattr`). No ACL, general xattr, hardlink, or mount-identity tracking exists. Timestamps (mtime) are used for the recency heuristic in `persistence.rs` and acknowledged in that code's own comments as "not inherently malicious... worth a manual read" — i.e. the weak-evidence caveat this requirement wants is already in the finding text. |
 | FS-04 | IMPLEMENTED-VERIFIED | — | `src/checks/persistence.rs::scan_recent_at_depth`; tests `scan_recent_terminates_on_a_cyclic_directory_symlink`, `entry_point_symlink_is_followed_but_nested_symlink_is_not` | Fixed today (this audit's second finding). Previously: `scan_recent` used `fs::metadata` (follows symlinks) at every recursion depth with no explicit bound — a directory symlink loop, plantable by any unprivileged user under their own `~/.config/autostart`, recursed until `fs::read_dir` happened to error past `PATH_MAX` (~900 levels, confirmed empirically — not a crash, but an accidental bound the code never chose). Fixed: `symlink_metadata` (not followed) for anything found during recursion, `fs::metadata` (followed) only at the trusted entry point (preserving dotfile-manager setups that symlink a whole config directory into place), plus an explicit `MAX_SCAN_DEPTH = 40` as a second, independent bound. |
@@ -278,3 +278,19 @@ NOT-APPLICABLE-WITH-REASON for this deployment profile: a single-host, live-tria
 verifier, baseline, or external infrastructure. That is a true statement about current scope,
 not a claim those requirements don't matter — see `docs/SPEC.md`'s four-phase roadmap and
 `FUTURE_AVENUES.md` for where they're expected to land.
+
+## Addendum: 2026-10-30 — FS-01 moved from MISSING to PARTIAL
+
+`src/checks/baseline.rs` landed: parses pacman and dpkg local package databases directly (no
+shelling out) and flags executables in standard system directories unowned by any installed
+package — the "rogue software" case. Verified live against this host's real pacman database
+(537,504 owned paths) and with a new testbench scenario (`rogue-unowned-binary`) proving
+detection against a genuinely unowned planted binary, not just absence of false positives.
+
+This closes the *ownership* half of FS-01 only. The *integrity* half — does a package-owned
+file's content still match what was shipped — remains MISSING: pacman's per-file hashes live
+in a gzip-compressed `.MTREE` per package (new parsing work, needs a DEFLATE dependency), dpkg
+carries no per-file hashes in its base format, and RPM's binary database is unsupported
+entirely (reported as an honest coverage gap, not faked). No existing check
+(persistence/libraries/accounts/pam) has been updated to consult the new ownership set yet —
+see FS-01's row for the full detail. Testbench is now 10/10 scenarios, 8 checks.

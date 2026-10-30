@@ -123,6 +123,17 @@ exactly what's wired up versus still on the backlog.
     curated list of common legitimate uses (SSO fallthrough, su-style
     "already proven" shortcuts) — the pattern malicious PAM modules use
     for an authentication bypass.
+- **Baseline** (`src/checks/baseline.rs`) — "rogue software": executables
+  in standard system directories (`/usr/bin`, `/usr/sbin`, `/bin`,
+  `/sbin`, `/usr/local/{bin,sbin}`) that no installed package owns,
+  checked against pacman's or dpkg's own local database, parsed
+  directly — never by shelling out to `pacman`/`dpkg`. Severity is
+  split by location: High in the standard system directories (should be
+  ~100% package-owned on any stock install), Low under `/usr/local`
+  (the normal, expected home for software installed outside the package
+  manager). Ownership only for now, not file-content integrity — see
+  `docs/VERIFICATION_MATRIX.md`'s FS-01 row for exactly what that still
+  leaves open (RPM is unsupported; no per-file hash comparison yet).
 
 Each finding carries a severity (`info` / `low` / `medium` / `high` /
 `critical`), a one-line summary, and a detail string explaining *why* it
